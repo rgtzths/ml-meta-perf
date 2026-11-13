@@ -2,9 +2,9 @@
 
 * **E3 (fixed form)**: the published fit's own scores. Its terms are chosen once, on every
   row, so its held-out scores are an upper estimate.
-* **E3 (form per fold)**: the term library and search rebuilt inside every held-out fold from
-  the training rows only, so no held-out row influences which terms are used. The length is the
-  published fit's, chosen on every row.
+* **E3 (form per fold)**: E3's term library, built once from every row's features, with the
+  search re-run inside every held-out fold on the training rows' targets only, so no held-out
+  outcome influences which terms are used. The length is the published fit's, chosen on every row.
 * **mean**: the training fold's mean of the target.
 * **GradientBoosting**: scikit-learn's regressor on the E3 fit's features, at the sizes in
   ``config/study.json``'s ``opaque`` block, untuned, with the MCC study's seed.
@@ -53,7 +53,7 @@ from ml_meta_perf.experiment import FlexFLReport, run_flexfl
 from ml_meta_perf.opaque import SEED
 from ml_meta_perf.search import search
 from ml_meta_perf.terms import build_library
-from ml_meta_perf.validate import leave_one_group_out, score
+from ml_meta_perf.validate import leave_one_group_out, library_rows, score
 
 ANALYTIC_TARGET = "comm_bytes_total"
 ANALYTIC_COLUMNS: tuple[str, ...] = ("min_workers", "pool_batches", "n_epochs")
@@ -154,20 +154,21 @@ def fold_boosting(design: np.ndarray, truth: np.ndarray, opaque: OpaqueConfig) -
 def fold_search(
     frame: pl.DataFrame, schema: Schema, truth: np.ndarray, n_terms: int, config: Configuration
 ) -> FitPredict:
-    """E3's term library and search built from the training rows only, at most ``n_terms`` long,
-    predicting the test rows. ``n_terms`` itself is the caller's, usually the all-row fit's length."""
+    """E3's term library, built once from every row's features, with its search re-run on the
+    training rows' targets only, at most ``n_terms`` long, predicting the test rows. ``n_terms``
+    itself is the caller's, usually the all-row fit's length."""
     columns = columns_as_arrays(frame, schema.features)
+    library = build_library(
+        schema.dataset_features,
+        schema.model_features,
+        columns,
+        max_arity=config.max_arity,
+        max_abs_zscore=config.max_abs_zscore,
+    )
 
     def fit_predict(train: np.ndarray, test: np.ndarray) -> np.ndarray:
-        library = build_library(
-            schema.dataset_features,
-            schema.model_features,
-            {name: values[train] for name, values in columns.items()},
-            max_arity=config.max_arity,
-            max_abs_zscore=config.max_abs_zscore,
-        )
         result = search(
-            library,
+            library_rows(library, train),
             truth[train],
             max_terms=n_terms,
             penalty=config.penalty,
@@ -196,7 +197,12 @@ def resolve_splits(
             raise ValueError(f"{IN_SAMPLE!r} is not a held-out split")
         if label in resolved and not np.array_equal(np.asarray(labels), resolved[label]):
             raise ValueError(f"split {label!r} is reserved for the {DEFAULT_SPLITS[label]} grouping")
-        resolved[label] = np.asarray(labels)
+        values = np.asarray(labels)
+        if values.shape != (frame.height,):
+            raise ValueError(f"split {label!r} needs one label per loaded row ({frame.height})")
+        if np.unique(values).size < 2:
+            raise ValueError(f"split {label!r} needs at least two groups")
+        resolved[label] = values
     return resolved
 
 
@@ -218,6 +224,9 @@ def _analytic_inputs(frame: pl.DataFrame, schema: Schema) -> tuple[dict[str, np.
     unrecorded = int(np.sum(np.isnan(columns["min_workers"])))
     if unrecorded:
         return None, f"analytic baseline skipped: {unrecorded} rows have no min_workers"
+    unmeasured = int(np.sum(np.isnan(columns["n_epochs"])))
+    if unmeasured:
+        return None, f"analytic baseline skipped: {unmeasured} rows have no n_epochs"
     centralized = np.isin(columns["fl_algo"], ("CentralizedSync", "CentralizedAsync"))
     unreported = int(np.sum(centralized & np.isnan(columns["pool_batches"])))
     if unreported:

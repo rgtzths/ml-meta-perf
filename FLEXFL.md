@@ -75,9 +75,9 @@ every fitted model are clipped to the training fold's range, as E3's are.
 
 - `E3 (fixed form)`: the E3 fit's own scores. Its terms are chosen once, on every row, so its
   LODO and LOMO scores are an upper estimate of transfer.
-- `E3 (form per fold)`: LODO and LOMO with the E3 term library and search rebuilt from each
-  training fold's rows, so no held-out row influences which terms are chosen. The length is the
-  E3 fit's, which was chosen on every row.
+- `E3 (form per fold)`: LODO and LOMO with E3's term library, built once from every row's
+  features, and its search re-run on each training fold's targets, so no held-out outcome
+  influences which terms are chosen. The length is the E3 fit's, which was chosen on every row.
 - `mean`: the training fold's mean of the target. For `performance` the task type already
   restricts the rows.
 - `GradientBoosting (<n> stages)`: scikit-learn's regressor on the E3 fit's features, at the
@@ -95,7 +95,7 @@ every fitted model are clipped to the training fold's range, as E3's are.
   row uses an E3 `n_epochs` fit, on the raw scale: its equation in-sample and its search re-run
   per fold held out, floored at one epoch. Both are skipped, with a note on stderr and in
   `baseline_notes.txt`, when the corpus lacks `min_workers` or `pool_batches`, when a row has
-  no `min_workers`, or when a Centralized row has no `pool_batches`. Runs made before the sweep
+  no `min_workers` or no `n_epochs`, or when a Centralized row has no `pool_batches`. Runs made before the sweep
   recorded `min_workers` have neither.
 
 ## Commands
