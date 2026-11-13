@@ -19,8 +19,9 @@ from sklearn.ensemble import GradientBoostingRegressor
 from ml_meta_perf import cli, experiment
 from ml_meta_perf import flexfl_baselines as baselines
 from ml_meta_perf.config import load_config
-from ml_meta_perf.data import drop_constant_features, flexfl_schema, load, target
+from ml_meta_perf.data import columns_as_arrays, drop_constant_features, flexfl_schema, load, target
 from ml_meta_perf.flexfl_baselines import (
+    ANALYTIC_COLUMNS,
     ORACLE,
     PREDICTED,
     BaselineComparison,
@@ -35,6 +36,7 @@ from ml_meta_perf.flexfl_baselines import (
     resolve_splits,
     run_baselines,
 )
+from ml_meta_perf.terms import Library
 from ml_meta_perf.validate import leave_one_group_out, score
 from tests.test_flexfl_schema import FIXTURE, TINY, TINY_FLAGS
 
@@ -55,6 +57,7 @@ def with_analytic_columns(directory: Path, blank: str | None = None) -> Path:
     frame = frame.with_columns(
         (pl.col("num_workers") // 2 + 1).alias("min_workers"),
         pl.when(centralized).then(pl.col("num_workers") * 3).otherwise(None).alias("pool_batches"),
+        pl.lit(200).alias("epoch_cap"),
     )
     if blank is not None:
         first = frame["fl_algo"].to_list().index("CentralizedSync")
@@ -213,8 +216,21 @@ class FoldHelpersTest(unittest.TestCase):
         test = frame["dataset"].to_numpy() == "clf_a"
         test_expr = pl.col("dataset") == "clf_a"
         frame = frame.with_columns(pl.when(test_expr).then(0.0).otherwise(pl.col(name)).alias(name))
-        prediction = fold_search(frame, schema, target(frame, schema), 2, TINY)(~test, test)
+        columns = columns_as_arrays(frame, schema.features)
+        libraries: list[Library] = []
+        real = baselines.build_library
+
+        def build(*args: object, **kwargs: object) -> Library:
+            library = real(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+            libraries.append(library)
+            return library
+
+        with mock.patch.object(baselines, "build_library", side_effect=build):
+            prediction = fold_search(frame, schema, target(frame, schema), 2, TINY)(~test, test)
         self.assertTrue(np.isfinite(prediction).all())
+        with np.errstate(all="ignore"):
+            undefined = [term.name for term in libraries[0].terms if not np.isfinite(term.evaluate(columns)).all()]
+        self.assertEqual(undefined, [])
 
     def test_fold_search_scores_a_training_fold_with_constant_features(self) -> None:
         schema = flexfl_schema("comm_bytes_total", log_target=True)
@@ -281,9 +297,10 @@ class EpochPredictionsTest(unittest.TestCase):
             equation=SimpleNamespace(n_terms=1, equation=SimpleNamespace(predict=lambda _columns: np.full(rows, -2.0))),
         )
         labels = frame["dataset"].to_numpy()
+        cap = frame["epoch_cap"].to_numpy()
         expected = np.empty(rows)
         for _, train, test in leave_one_group_out(labels):
-            expected[test] = max(1.0, float(truth[train].min()))
+            expected[test] = np.minimum(max(1.0, float(truth[train].min())), cap[test])
 
         def negative(_train: np.ndarray, test: np.ndarray) -> np.ndarray:
             return np.full(int(test.sum()), -5.0)
@@ -295,11 +312,56 @@ class EpochPredictionsTest(unittest.TestCase):
         np.testing.assert_array_equal(predicted["in_sample"], np.ones(rows))
         np.testing.assert_array_equal(predicted["loo_dataset"], expected)
 
+    def test_predictions_are_capped_at_each_row_epoch_cap(self) -> None:
+        schema = flexfl_schema("n_epochs")
+        frame = load(FIXTURE, schema)
+        truth = target(frame, schema)
+        rows = frame.height
+        cap = frame["epoch_cap"].to_numpy()
+        report = SimpleNamespace(
+            schema=drop_constant_features(frame, schema),
+            equation=SimpleNamespace(n_terms=1, equation=SimpleNamespace(predict=lambda _columns: np.full(rows, 1e6))),
+        )
+        labels = frame["dataset"].to_numpy()
+        expected = np.empty(rows)
+        for _, train, test in leave_one_group_out(labels):
+            expected[test] = np.minimum(float(truth[train].max()), cap[test])
+
+        def huge(_train: np.ndarray, test: np.ndarray) -> np.ndarray:
+            return np.full(int(test.sum()), 1e6)
+
+        with mock.patch.object(baselines, "fold_search", return_value=huge):
+            predicted = epoch_predictions(report, frame, truth, {"loo_dataset": labels}, TINY)  # pyright: ignore[reportArgumentType]
+        np.testing.assert_array_equal(predicted["in_sample"], cap)
+        np.testing.assert_array_equal(predicted["loo_dataset"], expected)
+
 
 class RunBaselinesTest(unittest.TestCase):
     def test_comm_bytes_without_the_analytic_columns(self) -> None:
-        comparison = run_baselines(FIXTURE, flexfl_schema("comm_bytes_total"), TINY)
+        schema = flexfl_schema("comm_bytes_total")
+        report = experiment.run_flexfl(FIXTURE, schema, TINY)
+        comparison = run_baselines(FIXTURE, schema, TINY, report=report)
         table = comparison.table
+        e3 = report.equation
+        self.assertEqual(cell(table, "E3 (fixed form)", "in_sample", "r2"), e3.in_sample["r2"])
+        frame = load(FIXTURE, schema, extra_columns=ANALYTIC_COLUMNS)
+        truth = target(frame, schema)
+        features = columns_as_arrays(frame, report.schema.features)
+        design = np.column_stack([features[name] for name in report.schema.features])
+        per_fold = fold_search(frame, report.schema, truth, e3.n_terms, TINY)
+        boosting = fold_boosting(design, truth, load_config().opaque)
+        for protocol, labels in resolve_splits(frame, schema, None).items():
+            self.assertEqual(cell(table, "E3 (fixed form)", protocol, "r2"), e3.cross_validated[protocol]["r2"])
+            self.assertAlmostEqual(
+                cell(table, "E3 (form per fold)", protocol, "r2"),
+                score(truth, out_of_fold(per_fold, truth, labels)).r2,
+                places=12,
+            )
+            self.assertAlmostEqual(
+                cell(table, "GradientBoosting (50 stages)", protocol, "r2"),
+                score(truth, out_of_fold(boosting, truth, labels)).r2,
+                places=12,
+            )
         self.assertEqual(table.columns, ["target", "model", "protocol", "r2", "mae", "n", "corpus_sha256"])
         self.assertEqual(models(table), E3 | LEARNED)
         self.assertEqual(table.height, 11)
@@ -317,6 +379,8 @@ class RunBaselinesTest(unittest.TestCase):
             path = with_analytic_columns(Path(directory))
             comparison = run_baselines(path, schema, TINY)
             frame = load(path, schema, extra_columns=("min_workers", "pool_batches", "n_epochs"))
+            epochs_schema = flexfl_schema("n_epochs")
+            epochs_report = experiment.run_flexfl(path, epochs_schema, TINY)
         table = comparison.table
         self.assertEqual(comparison.notes, ())
         self.assertEqual(models(table), E3 | LEARNED | ANALYTIC)
@@ -335,6 +399,22 @@ class RunBaselinesTest(unittest.TestCase):
         truth = target(frame, schema)
         for protocol in PROTOCOLS:
             self.assertAlmostEqual(cell(table, ORACLE, protocol, "r2"), score(truth, expected).r2, places=12)
+        epochs = epoch_predictions(
+            epochs_report, frame, target(frame, epochs_schema), resolve_splits(frame, schema, None), TINY
+        )
+        self.assertEqual(set(epochs), PROTOCOLS)
+        for protocol, predicted in epochs.items():
+            bytes_predicted = analytic_comm_bytes(
+                frame["fl_algo"].to_numpy().astype(str),
+                predicted,
+                frame["epoch_cap"].to_numpy(),
+                frame["min_workers"].to_numpy(),
+                frame["pool_batches"].to_numpy(),
+                frame["total_parameters"].to_numpy(),
+            )
+            self.assertAlmostEqual(
+                cell(table, PREDICTED, protocol, "r2"), score(truth, np.log1p(bytes_predicted)).r2, places=12
+            )
 
     def test_a_row_without_an_analytic_input_skips_the_analytic_rows(self) -> None:
         for blank, note in (
@@ -373,6 +453,7 @@ class RunBaselinesTest(unittest.TestCase):
         self.assertEqual(comparison.notes, ())
         self.assertEqual(models(comparison.table), E3 | LEARNED)
         self.assertEqual(set(comparison.table["n"]), {12})
+        self.assertEqual(set(comparison.table["target"]), {"performance (classification)"})
 
     def test_an_extra_split_adds_rows_for_every_refitted_model(self) -> None:
         schema = flexfl_schema("comm_bytes_total")
@@ -487,6 +568,20 @@ class BaselinesCliTest(unittest.TestCase):
         self.assertEqual(notes, "")
         self.assertTrue({ORACLE, PREDICTED} <= models(table))
         self.assertNotIn("skipped", stderr)
+
+    def test_the_reported_time_includes_the_baselines(self) -> None:
+        clock = {"now": 0.0}
+
+        def slow(*_args: object, **_kwargs: object) -> BaselineComparison:
+            clock["now"] += 100.0
+            return BaselineComparison(pl.DataFrame({"model": ["mean"]}), ())
+
+        timer = SimpleNamespace(perf_counter=lambda: clock["now"])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            cli, "run_baselines", side_effect=slow
+        ), mock.patch.object(cli, "time", timer):
+            stdout, _ = self.run_cli(Path(directory), "--baselines")
+        self.assertIn("completed in 100.0s", stdout)
 
     def test_forwards_the_configuration_and_the_fitted_report(self) -> None:
         comparison = BaselineComparison(pl.DataFrame({"model": ["mean"]}), ())

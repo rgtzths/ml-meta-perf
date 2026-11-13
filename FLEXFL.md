@@ -93,10 +93,11 @@ every fitted model are clipped to the training fold's range, as E3's are.
   (Decentralized) tasks per epoch, plus the `min_workers - 1` tasks still in flight when it
   stops. The oracle row uses each run's own `n_epochs`, an outcome no other model sees. The E3
   row uses an E3 `n_epochs` fit, on the raw scale: its equation in-sample and its search re-run
-  per fold held out, floored at one epoch. Both are skipped, with a note on stderr and in
-  `baseline_notes.txt`, when the corpus lacks `min_workers` or `pool_batches`, when a row has
-  no `min_workers` or no `n_epochs`, or when a Centralized row has no `pool_batches`. Runs made before the sweep
-  recorded `min_workers` have neither.
+  per fold held out, floored at one epoch and capped at the run's `epoch_cap`. Both are skipped,
+  with a note on stderr and in `baseline_notes.txt`, when the corpus lacks `min_workers`,
+  `pool_batches` or `n_epochs`, when a row does not mark exactly one `fl_algo_*` column, when a
+  row has no `min_workers` or no `n_epochs`, or when a Centralized row has no `pool_batches`.
+  Runs made before the sweep recorded `min_workers` have neither.
 
 ## Commands
 

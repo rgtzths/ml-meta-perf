@@ -263,7 +263,6 @@ def _run_flexfl_cli(arguments: Namespace) -> int:
     schema = flexfl_schema(arguments.target, arguments.task_type, arguments.log_target)
     started = time.perf_counter()
     report = run_flexfl(arguments.data, schema, arguments.search, arguments.selection)
-    elapsed = time.perf_counter() - started
     if not arguments.quiet:
         _section(f"E3: {schema.label}")
         print(equation_text(report.equation.equation, schema.label))
@@ -297,7 +296,7 @@ def _run_flexfl_cli(arguments: Namespace) -> int:
             notes = "".join(f"{note}\n" for note in comparison.notes)
             (folder / "baseline_notes.txt").write_text(notes, encoding="utf-8")
             print(f"\nbaselines written to {folder / 'baseline_comparison.csv'}")
-    print(f"\ncompleted in {elapsed:.1f}s")
+    print(f"\ncompleted in {time.perf_counter() - started:.1f}s")
     return 0
 
 

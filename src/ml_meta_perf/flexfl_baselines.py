@@ -19,7 +19,7 @@
   epoch, plus the ``min_workers - 1`` tasks still in flight when the run stops. The *oracle*
   row uses the run's own ``n_epochs``, an outcome no other model sees; the *E3* row uses the
   ``n_epochs`` predictions of an E3 fit on the same protocol (fixed form in-sample, form per
-  fold held out), on the raw scale and floored at one epoch.
+  fold held out), on the raw scale, floored at one epoch and capped at the run's ``epoch_cap``.
 
 Every model is scored with `ml_meta_perf.validate.score` on the target's scale (``log1p`` for
 a log target). In-sample predictions are bounded only by the schema's bounds, as E3's are.
@@ -182,10 +182,6 @@ def fold_search(
     return fit_predict
 
 
-def fixed(predictions: np.ndarray) -> FitPredict:
-    return lambda _train, test: predictions[test]
-
-
 def resolve_splits(
     frame: pl.DataFrame, schema: Schema, splits: Mapping[str, np.ndarray] | None
 ) -> dict[str, np.ndarray]:
@@ -253,17 +249,18 @@ def epoch_predictions(
     protocols: Mapping[str, np.ndarray],
     config: Configuration,
 ) -> dict[str, np.ndarray]:
-    """The E3 ``n_epochs`` fit's predictions per protocol, floored at one epoch.
+    """The E3 ``n_epochs`` fit's predictions per protocol, between one epoch and each row's ``epoch_cap``.
 
     In-sample uses the fit's own equation; each held-out protocol re-runs its search per fold.
     """
     fitted = epochs_report.schema
     columns = columns_as_arrays(frame, fitted.features)
+    cap = columns_as_arrays(frame, (FLEXFL_EPOCH_CAP_COLUMN,))[FLEXFL_EPOCH_CAP_COLUMN]
     per_fold = fold_search(frame, fitted, epochs_truth, epochs_report.equation.n_terms, config)
     predicted = {IN_SAMPLE: np.asarray(epochs_report.equation.equation.predict(columns), dtype=np.float64)} | {
         label: out_of_fold(per_fold, epochs_truth, labels) for label, labels in protocols.items()
     }
-    return {label: np.maximum(values, 1.0) for label, values in predicted.items()}
+    return {label: np.clip(values, 1.0, cap) for label, values in predicted.items()}
 
 
 def _scores(model: str, protocol: str, truth: np.ndarray, predicted: np.ndarray) -> dict[str, object]:
@@ -344,8 +341,9 @@ def run_baselines(
             ]
 
     digest = corpus_digest(resolved)
+    label = schema.label if schema.task_type is None else f"{schema.label} ({schema.task_type})"
     table = pl.DataFrame(
-        [{"target": schema.label, **row, "corpus_sha256": digest} for row in rows],
+        [{"target": label, **row, "corpus_sha256": digest} for row in rows],
         schema={
             "target": pl.String,
             "model": pl.String,
