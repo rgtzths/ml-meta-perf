@@ -44,8 +44,9 @@ Equations are labelled `log1p(<target>)` and named `E3_log1p_k<n>`.
 
 A FlexFL target runs E3 only, over every FlexFL dataset and model feature, under the
 configuration in `config/study.json` and the study's length rule. There is no E1, E2 or E3-MAX,
-and none of the MCC study's baselines, practices, figures or chapters. Features constant in the
-loaded frame are removed before the term library is built.
+and none of the MCC study's baselines, practices, figures or chapters; `--baselines` adds the
+FlexFL baselines below. Features constant in the loaded frame are removed before the term
+library is built.
 
 Unbounded targets, the cost targets and `n_epochs`, prune terms whose contribution spans
 less than 0.002 times the target's 1st-to-99th percentile spread divided by 2, while
@@ -62,12 +63,50 @@ training row, so its terms get no weight there. FlexFL LOMO R² therefore measur
 to an unseen algorithm without per-algorithm offsets, and it is not comparable with the MCC
 study's LOMO, whose model features are descriptors shared across models.
 
+## Baselines
+
+`--baselines` scores these beside the E3 fit, in-sample and under LODO and LOMO, and writes
+`baseline_comparison.csv` next to the equation: one row per model and protocol with
+`target`, `model`, `protocol`, `r2`, `mae`, `n` and `corpus_sha256`, the first twelve hex
+digits of the CSV's SHA-256. It also writes `baseline_notes.txt`, empty unless a baseline was
+skipped. Every model is scored on the fitted scale, `log1p` with `--log-target`. In-sample
+predictions are bounded only by the target's bounds, as E3's are. Held-out predictions of
+every fitted model are clipped to the training fold's range, as E3's are.
+
+- `E3 (fixed form)`: the E3 fit's own scores. Its terms are chosen once, on every row, so its
+  LODO and LOMO scores are an upper estimate of transfer.
+- `E3 (form per fold)`: LODO and LOMO with the E3 term library and search rebuilt from each
+  training fold's rows, so no held-out row influences which terms are chosen. The length is the
+  E3 fit's, which was chosen on every row.
+- `mean`: the training fold's mean of the target. For `performance` the task type already
+  restricts the rows.
+- `GradientBoosting (<n> stages)`: scikit-learn's regressor on the E3 fit's features, at the
+  `opaque` sizes in `config/study.json`, untuned.
+- `analytic oracle (observed n_epochs)` and `analytic (E3 n_epochs)`: `comm_bytes_total` only,
+  with no fitted constant and never clipped. A model-sized message is taken to carry
+  `4 * total_parameters` bytes; control messages and serialization overhead are left out. A
+  synchronous run exchanges one message each way per pool worker per round. A DecentralizedSync
+  round is one epoch. A CentralizedSync round covers `min_workers` of the `pool_batches` batches
+  of an epoch, so a run takes `ceil(epochs * pool_batches / min_workers)` rounds. A synchronous
+  run that stopped early, below `epoch_cap`, runs one more round. An asynchronous run exchanges
+  one message each way per completed task, `pool_batches` (Centralized) or `min_workers`
+  (Decentralized) tasks per epoch, plus the `min_workers - 1` tasks still in flight when it
+  stops. The oracle row uses each run's own `n_epochs`, an outcome no other model sees. The E3
+  row uses an E3 `n_epochs` fit, on the raw scale: its equation in-sample and its search re-run
+  per fold held out, floored at one epoch. Both are skipped, with a note on stderr and in
+  `baseline_notes.txt`, when the corpus lacks `min_workers` or `pool_batches`, when a row has
+  no `min_workers`, or when a Centralized row has no `pool_batches`. Runs made before the sweep
+  recorded `min_workers` have neither.
+
 ## Commands
 
 ```bash
 # one E3 fit; writes equation.json, equation.txt, curve.csv, term_effects.csv and
 # group_shares.csv under results/flexfl/<slug>/
 ml-meta-perf --target total_time_s --log-target --data meta_dataset.csv
+
+# the same fit plus the baselines; adds baseline_comparison.csv
+ml-meta-perf --target comm_bytes_total --log-target --data meta_dataset.csv --baselines
 
 # the configuration sweep on the same target
 ml-meta-perf-search --target total_time_s --log-target --data meta_dataset.csv --output results/sweep_time

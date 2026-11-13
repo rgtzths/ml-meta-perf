@@ -591,13 +591,19 @@ class SchemaError(ValueError):
     """The CSV does not carry the columns the meta-model needs, or a value is out of domain for its transform."""
 
 
-def load(path: str | Path | None = None, schema: Schema = MCC_SCHEMA) -> pl.DataFrame:
+def load(
+    path: str | Path | None = None, schema: Schema = MCC_SCHEMA, extra_columns: tuple[str, ...] = ()
+) -> pl.DataFrame:
     """Read the meta-dataset and check it has the expected shape.
 
     The schema selects the required columns and optional task type.
     Every feature is cast to Float64. The integer-valued columns (``nr_attr``,
     ``nr_class``, ...) are still continuous as far as the equations are concerned,
     and carrying two dtypes through the term library buys nothing.
+
+    ``extra_columns`` that the CSV has are kept after the schema's columns, cast to Float64
+    and not null-checked; ones it lacks are left out, and ones the schema already selects are
+    ignored. They change neither the rows kept nor their order.
     """
     resolved = Path(path) if path is not None else DEFAULT_PATH
     if not resolved.is_file():
@@ -632,12 +638,14 @@ def load(path: str | Path | None = None, schema: Schema = MCC_SCHEMA) -> pl.Data
     if missing:
         raise SchemaError(f"missing columns: {missing}")
 
-    frame = frame.select(expected).with_columns(
-        [pl.col(column).cast(pl.Float64) for column in (*schema.features, schema.target_column)]
+    extras = tuple(dict.fromkeys(c for c in extra_columns if c in frame.columns and c not in expected))
+    frame = frame.select(*expected, *extras).with_columns(
+        [pl.col(column).cast(pl.Float64) for column in (*schema.features, schema.target_column, *extras)]
     )
 
     droppable = schema.target_column in FLEXFL_DECOMPOSITION_TARGETS
     checked = frame.drop(schema.target_column) if droppable else frame
+    checked = checked.drop(extras)
     nulls = sum(checked.null_count().row(0))
     if nulls:
         raise SchemaError(f"meta-dataset contains {nulls} null values")

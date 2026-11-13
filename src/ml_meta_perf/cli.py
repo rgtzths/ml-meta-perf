@@ -47,6 +47,7 @@ from ml_meta_perf.data import (
     target,
 )
 from ml_meta_perf.experiment import Report, equation_text, run, run_flexfl
+from ml_meta_perf.flexfl_baselines import run_baselines
 from ml_meta_perf.practices import render as render_practices
 from ml_meta_perf.report import term_importance, write_into_chapters
 
@@ -230,6 +231,11 @@ def build_parser() -> ArgumentParser:
         "--data", type=str | None, default=None, help="meta-dataset CSV (default: dataset/meta_dataset.csv)"
     )
     add_target_arguments(parser)
+    parser.add_argument(
+        "--baselines",
+        action="store_true",
+        help="FlexFL targets: also score the mean, gradient-boosting and analytic baselines (baseline_comparison.csv)",
+    )
     parser.add_argument("--output", type=str, default="results", help="directory for the equations and CSV tables")
     parser.add_argument("--figures", type=str, default="assets/figures", help="directory for the generated figures")
     # The generated results go *into* the chapters that discuss them, between markers, rather
@@ -276,6 +282,21 @@ def _run_flexfl_cli(arguments: Namespace) -> int:
         report.effects.write_csv(destination / "term_effects.csv")
         report.shares.write_csv(destination / "group_shares.csv")
         print(f"\nequation written to {destination}")
+    if arguments.baselines:
+        comparison = run_baselines(
+            arguments.data, schema, arguments.search, arguments.selection, arguments.opaque, report=report
+        )
+        for note in comparison.notes:
+            print(note, file=sys.stderr)
+        if not arguments.quiet:
+            _section(f"Baselines: {schema.label}")
+            _show(comparison.table)
+        if arguments.output:
+            folder = Path(arguments.output) / "flexfl" / schema.slug
+            comparison.table.write_csv(folder / "baseline_comparison.csv")
+            notes = "".join(f"{note}\n" for note in comparison.notes)
+            (folder / "baseline_notes.txt").write_text(notes, encoding="utf-8")
+            print(f"\nbaselines written to {folder / 'baseline_comparison.csv'}")
     print(f"\ncompleted in {elapsed:.1f}s")
     return 0
 
@@ -296,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.instantiate(parser.parse_args(argv))
     check_target_arguments(parser, arguments)
+    if arguments.baselines and arguments.target == "mcc":
+        parser.error("--baselines applies only to a FlexFL --target")
     if arguments.target != "mcc":
         return _run_flexfl_cli(arguments)
     phases = phases_of(arguments)
