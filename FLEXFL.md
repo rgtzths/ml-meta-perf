@@ -99,6 +99,29 @@ every fitted model are clipped to the training fold's range, as E3's are.
   row has no `min_workers` or no `n_epochs`, or when a Centralized row has no `pool_batches`.
   Runs made before the sweep recorded `min_workers` have neither.
 
+## Extrapolation
+
+`--extrapolation` does what `--baselines` does and adds six protocols to the same table. Each is
+scored on its held-out rows only, so its `n` is the number of held-out runs.
+
+- `extrapolate_workers`: one fold, fitted on the runs with at most 34 workers (`num_workers`)
+  and scored on the runs with 36 to 56. `extrapolate_workers_unclipped` is the same fold with
+  the fitted models' predictions not clipped to the training range, since that clip caps the
+  cost a larger cluster can reach; for `performance` they stay within the target's bounds, as
+  E3's equation keeps its own. The analytic rows are never clipped and so appear only
+  under `extrapolate_workers`.
+- `loo_distribution`: three folds, each fitted on two of iid, non_iid and dirichlet (the
+  `strategy` column) and scored on the third, pooled into one score. `holdout_iid`,
+  `holdout_non_iid` and `holdout_dirichlet` score each fold alone. Runs with any other
+  strategy are in no fold.
+
+Under these protocols, which E3 does not report itself, `E3 (fixed form)` keeps the published
+equation's terms and refits their weights on each training fold. The published equation is
+the pruned one, while E3's own LODO and LOMO scores refit the form before pruning. The term
+library and the equation length still come from every row, as for `E3 (form per fold)`. A
+protocol whose fold has an empty side, or a corpus missing one of the three strategies, is
+skipped with a note on stderr and in `baseline_notes.txt`.
+
 ## Commands
 
 ```bash

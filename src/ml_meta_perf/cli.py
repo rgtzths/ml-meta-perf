@@ -236,6 +236,11 @@ def build_parser() -> ArgumentParser:
         action="store_true",
         help="FlexFL targets: also score the mean, gradient-boosting and analytic baselines (baseline_comparison.csv)",
     )
+    parser.add_argument(
+        "--extrapolation",
+        action="store_true",
+        help="FlexFL targets: --baselines plus the worker-count and distribution extrapolation protocols",
+    )
     parser.add_argument("--output", type=str, default="results", help="directory for the equations and CSV tables")
     parser.add_argument("--figures", type=str, default="assets/figures", help="directory for the generated figures")
     # The generated results go *into* the chapters that discuss them, between markers, rather
@@ -281,9 +286,15 @@ def _run_flexfl_cli(arguments: Namespace) -> int:
         report.effects.write_csv(destination / "term_effects.csv")
         report.shares.write_csv(destination / "group_shares.csv")
         print(f"\nequation written to {destination}")
-    if arguments.baselines:
+    if arguments.baselines or arguments.extrapolation:
         comparison = run_baselines(
-            arguments.data, schema, arguments.search, arguments.selection, arguments.opaque, report=report
+            arguments.data,
+            schema,
+            arguments.search,
+            arguments.selection,
+            arguments.opaque,
+            report=report,
+            extrapolation=arguments.extrapolation,
         )
         for note in comparison.notes:
             print(note, file=sys.stderr)
@@ -318,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
     check_target_arguments(parser, arguments)
     if arguments.baselines and arguments.target == "mcc":
         parser.error("--baselines applies only to a FlexFL --target")
+    if arguments.extrapolation and arguments.target == "mcc":
+        parser.error("--extrapolation applies only to a FlexFL --target")
     if arguments.target != "mcc":
         return _run_flexfl_cli(arguments)
     phases = phases_of(arguments)

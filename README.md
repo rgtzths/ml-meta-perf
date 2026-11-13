@@ -286,6 +286,7 @@ Run options are ordinary flags:
 | `--task-type` | none | restrict a FlexFL target to classification or regression; required for performance |
 | `--log-target` | off | fit `log1p` of a cost target; metrics on the log scale; outputs under `flexfl/<slug>-log1p/` |
 | `--baselines` | off | FlexFL targets: also score the mean, gradient-boosting and analytic baselines; see [the FlexFL guide](FLEXFL.md) |
+| `--extrapolation` | off | FlexFL targets: `--baselines` plus the worker-count and leave-one-distribution-out protocols; see [the FlexFL guide](FLEXFL.md) |
 | `--output` | `results` | where the equations and comma-separated value (CSV) tables go |
 | `--figures` | `assets/figures` | where the figures go |
 | `--docs` | `assets/docs` | chapter directory whose generated sections are rewritten |
