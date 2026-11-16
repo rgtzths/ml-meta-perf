@@ -85,8 +85,10 @@ every fitted model are clipped to the training fold's range, as E3's are.
 - `GradientBoosting (<n> stages)`: scikit-learn's regressor on the E3 fit's features, at the
   `opaque` sizes in `config/study.json`, untuned.
 - `analytic oracle (observed n_epochs)` and `analytic (E3 n_epochs)`: `comm_bytes_total` only,
-  with no fitted constant and never clipped. A model-sized message is taken to carry
-  `4 * total_parameters` bytes; control messages and serialization overhead are left out. A
+  with no fitted constant and never clipped. A model-sized message carries its pickled size, the
+  `{"type", "data"}` dictionary FlexFL's Raw message layer pickles at protocol 4 with the weights
+  as one float32 array: `4 * total_parameters` bytes plus a pickle header, 171 to 183 bytes for
+  the models of 73 to 96,278 parameters in the tier-10 corpus. Control messages are left out. A
   synchronous run exchanges one message each way per pool worker per round. A DecentralizedSync
   round is one epoch. A CentralizedSync round covers `min_workers` of the `pool_batches` batches
   of an epoch, so a run takes `ceil(epochs * pool_batches / min_workers)` rounds. A synchronous

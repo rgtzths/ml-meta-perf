@@ -8,10 +8,11 @@
 * **mean**: the training fold's mean of the target.
 * **GradientBoosting**: scikit-learn's regressor on the E3 fit's features, at the sizes in
   ``config/study.json``'s ``opaque`` block, untuned, with the MCC study's seed.
-* **analytic**: ``comm_bytes_total`` only, with no fitted constant. A model-sized message is
-  taken to carry ``4 * total_parameters`` bytes; control messages and serialization overhead
-  are left out. The master exchanges one message each way per pool worker per round. A
-  DecentralizedSync round is one epoch; a CentralizedSync round covers ``min_workers`` of the
+* **analytic**: ``comm_bytes_total`` only, with no fitted constant. A model-sized message
+  carries its pickled size, ``{"type": <task>, "data": <float32 weights>}`` at pickle protocol
+  4, as FlexFL's Raw message layer sends it, with ``<task>`` one of FlexFL's small-int ``Task``
+  ids; control messages are left out. The master exchanges one message each way per pool
+  worker per round. A DecentralizedSync round is one epoch; a CentralizedSync round covers ``min_workers`` of the
   ``pool_batches`` batches in an epoch, so a run needs ``ceil(epochs * pool_batches /
   min_workers)`` rounds; a synchronous run stopped early, below ``epoch_cap``, runs one more
   round before it stops. The asynchronous algorithms exchange one message each way per
@@ -47,6 +48,7 @@ missing a strategy, is skipped with a note.
 from __future__ import annotations
 
 import hashlib
+import pickle
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,7 +90,7 @@ EXTRAPOLATION_PROTOCOLS = frozenset(
     {WORKERS, WORKERS + UNCLIPPED, POOLED_DISTRIBUTION, *(f"{HOLDOUT}{name}" for name in DISTRIBUTIONS)}
 )
 ANALYTIC_COLUMNS: tuple[str, ...] = ("min_workers", "pool_batches", "n_epochs")
-BYTES_PER_PARAMETER = 4.0
+FLEXFL_PICKLE_PROTOCOL = 4
 FL_ALGOS: tuple[str, ...] = ("CentralizedSync", "CentralizedAsync", "DecentralizedSync", "DecentralizedAsync")
 IN_SAMPLE = "in_sample"
 DEFAULT_SPLITS: dict[str, str] = {"loo_dataset": "dataset", "loo_model": "model"}
@@ -176,6 +178,19 @@ def analytic_messages(
     )
 
 
+def message_bytes(total_parameters: np.ndarray) -> np.ndarray:
+    """Bytes of one model-sized FlexFL message: its Raw message layer's pickle of
+    ``{"type": <task>, "data": <float32 weights>}``, at the protocol FlexFL's Python 3.12
+    workers pickle with. ``<task>`` is FlexFL's ``Task.WORK`` (0) or ``Task.WORK_DONE`` (1),
+    which pickle to the same length."""
+    sizes, inverse = np.unique(np.asarray(total_parameters, dtype=np.int64), return_inverse=True)
+    one = [
+        len(pickle.dumps({"type": 0, "data": np.zeros(int(size), np.float32)}, protocol=FLEXFL_PICKLE_PROTOCOL))
+        for size in sizes
+    ]
+    return np.asarray(one, dtype=np.float64)[inverse].reshape(np.shape(total_parameters))
+
+
 def analytic_comm_bytes(
     fl_algo: np.ndarray,
     n_epochs: np.ndarray,
@@ -184,9 +199,9 @@ def analytic_comm_bytes(
     pool_batches: np.ndarray,
     total_parameters: np.ndarray,
 ) -> np.ndarray:
-    """``comm_bytes_total`` predicted from the message count and the model size."""
+    """``comm_bytes_total`` predicted from the message count and one message's pickled size."""
     messages = analytic_messages(fl_algo, n_epochs, epoch_cap, workers, pool_batches)
-    return BYTES_PER_PARAMETER * total_parameters * messages
+    return message_bytes(total_parameters) * messages
 
 
 def corpus_digest(path: str | Path) -> str:
