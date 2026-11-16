@@ -6,7 +6,7 @@ import dataclasses
 import io
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -31,7 +31,6 @@ from ml_meta_perf.flexfl_baselines import (
     extrapolation_protocols,
     fold_boosting,
     fold_fixed_form,
-    fold_mean,
     fold_search,
     grouped,
     held_out,
@@ -146,13 +145,36 @@ class HeldOutTest(unittest.TestCase):
         np.testing.assert_array_equal(clipped, [np.nan, np.nan, np.nan, 3.0, np.nan])
         np.testing.assert_array_equal(unclipped, [np.nan, np.nan, np.nan, 100.0, np.nan])
 
-    def test_grouped_matches_leave_one_group_out(self) -> None:
-        labels = np.array(["a", "a", "b", "b", "c"])
-        np.testing.assert_array_equal(
-            held_out(fold_mean(self.truth), self.truth, grouped(labels)),
-            out_of_fold(fold_mean(self.truth), self.truth, labels),
-        )
+    def test_grouped_holds_out_each_group_in_row_order(self) -> None:
+        labels = np.array(["b", "a", "b", "c", "a"])
+
+        def ramp(train: np.ndarray, test: np.ndarray) -> np.ndarray:
+            return np.arange(int(test.sum()), dtype=np.float64) * 10.0 + self.truth[train].mean()
+
+        expected = np.empty_like(self.truth)
+        for label in ("a", "b", "c"):
+            test = labels == label
+            train = ~test
+            raw = np.arange(int(test.sum()), dtype=np.float64) * 10.0 + self.truth[train].mean()
+            expected[test] = np.clip(raw, self.truth[train].min(), self.truth[train].max())
+        np.testing.assert_array_equal(held_out(ramp, self.truth, grouped(labels)), expected)
+        np.testing.assert_array_equal(out_of_fold(ramp, self.truth, labels), expected)
         np.testing.assert_array_equal(grouped(labels).scored, np.ones(5, dtype=bool))
+
+    def test_a_fold_shared_by_two_protocols_is_fitted_once(self) -> None:
+        fold = Fold(np.array([True, True, True, False, False]), np.array([False, False, False, True, True]))
+        calls: list[np.ndarray] = []
+
+        def counted(_train: np.ndarray, test: np.ndarray) -> np.ndarray:
+            calls.append(test)
+            return np.array([0.0, 100.0])
+
+        fits: dict[Fold, np.ndarray] = {}
+        clipped = held_out(counted, self.truth, Protocol((fold,)), fits=fits)
+        unclipped = held_out(counted, self.truth, Protocol((fold,), clip=False), (-1.0, 50.0), fits=fits)
+        self.assertEqual(len(calls), 1)
+        np.testing.assert_array_equal(clipped[3:], [1.0, 3.0])
+        np.testing.assert_array_equal(unclipped[3:], [0.0, 50.0])
 
 
 class FixedFormTest(unittest.TestCase):
@@ -215,6 +237,19 @@ class LoadLabelsTest(unittest.TestCase):
         expected = raw.filter(pl.col("is_classification").cast(pl.Boolean))["strategy"]
         self.assertEqual(frame["strategy"].to_list(), expected.to_list())
         self.assertTrue(frame.select(plain.columns).equals(plain))
+
+    def test_label_columns_already_selected_are_ignored(self) -> None:
+        schema = flexfl_schema("performance", "classification")
+        plain = load(FIXTURE, schema)
+        frame = load(
+            FIXTURE,
+            schema,
+            extra_columns=("n_epochs",),
+            label_columns=("num_workers", "dataset", schema.target_column, "n_epochs"),
+        )
+        self.assertEqual(frame.columns, [*plain.columns, "n_epochs"])
+        self.assertTrue(frame.select(plain.columns).equals(plain))
+        self.assertEqual(frame["n_epochs"].dtype, pl.Float64)
 
 
 class EpochProtocolTest(unittest.TestCase):
@@ -379,24 +414,40 @@ class RunBaselinesExtrapolationTest(unittest.TestCase):
         schema = flexfl_schema("performance", "classification")
         bounds = schema.bounds
         assert bounds is not None
-
-        def far(_train: np.ndarray, test: np.ndarray) -> np.ndarray:
-            return np.full(int(test.sum()), 5.0)
-
-        with mock.patch.object(baselines, "fold_search", return_value=far):
-            table = run_baselines(self.path, schema, TINY, extrapolation=True).table
         frame = load(self.path, schema)
         truth = target(frame, schema)
         test = frame["num_workers"].to_numpy() >= 36
-        expected = score(truth[test], np.full(int(test.sum()), bounds[1])).mae
-        self.assertAlmostEqual(
-            cell(table, "E3 (form per fold)", "extrapolate_workers_unclipped", "mae"), expected, places=12
-        )
+        factories = ("fold_search", "fold_fixed_form", "fold_mean", "fold_boosting")
+        for value, bound in ((5.0, bounds[1]), (-5.0, bounds[0])):
+
+            def far(_train: np.ndarray, held: np.ndarray, value: float = value) -> np.ndarray:
+                return np.full(int(held.sum()), value)
+
+            with self.subTest(value=value), ExitStack() as stack:
+                for factory in factories:
+                    stack.enter_context(mock.patch.object(baselines, factory, return_value=far))
+                table = run_baselines(self.path, schema, TINY, extrapolation=True).table
+                expected = score(truth[test], np.full(int(test.sum()), bound)).mae
+                for model in E3 | LEARNED:
+                    unclipped = cell(table, model, "extrapolate_workers_unclipped", "mae")
+                    self.assertAlmostEqual(unclipped, expected, places=12)
+
+    def test_each_fold_is_fitted_once_per_model(self) -> None:
+        fitted: list[bytes] = []
+
+        def recorded(train: np.ndarray, test: np.ndarray) -> np.ndarray:
+            fitted.append(train.tobytes() + test.tobytes())
+            return np.zeros(int(test.sum()))
+
+        with mock.patch.object(baselines, "fold_search", return_value=recorded):
+            table = run_baselines(self.path, self.schema, TINY, extrapolation=True).table
+        self.assertEqual(set(table["protocol"]), DEFAULT | NEW)
+        self.assertEqual(len(fitted), len(set(fitted)))
 
     def test_reserved_names_hold_when_their_protocols_are_skipped(self) -> None:
         frame = load(FIXTURE, flexfl_schema("comm_bytes_total"))
         halves = np.where(frame["num_workers"].to_numpy() > 10, "a", "b")
-        for name in ("holdout_dirichlet", "extrapolate_workers"):
+        for name in sorted(NEW):
             with (
                 self.subTest(name=name),
                 self.assertRaisesRegex(ValueError, "reserved for the extrapolation protocols"),
@@ -467,6 +518,19 @@ class ExtrapolationCliTest(unittest.TestCase):
             self.run_cli("--extrapolation", data=data, out=out)
             table = pl.read_csv(out / "flexfl" / "comm_bytes_total" / "baseline_comparison.csv")
         self.assertEqual(set(table["protocol"]), DEFAULT | NEW)
+
+    def test_skipped_protocols_are_reported_on_stderr_and_in_the_notes_file(self) -> None:
+        skipped = [
+            "extrapolation protocol extrapolate_workers skipped: 24 runs with at most 34 workers and 0 with 36 to 56",
+            "distribution protocols skipped: no runs with strategy dirichlet",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "out"
+            _, stderr = self.run_cli("--extrapolation", out=out)
+            notes = (out / "flexfl" / "comm_bytes_total" / "baseline_notes.txt").read_text(encoding="utf-8")
+        self.assertEqual(notes.splitlines()[:2], skipped)
+        for note in skipped:
+            self.assertIn(note, stderr.splitlines())
 
     def test_forwards_the_flag(self) -> None:
         comparison = BaselineComparison(pl.DataFrame({"model": ["mean"]}), ())

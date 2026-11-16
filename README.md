@@ -239,7 +239,7 @@ adopting it is a reviewed edit to `config/study.json`.
 
 FlexFL targets are available in both commands; see [the FlexFL guide](FLEXFL.md). The study CLI writes `equation.json`, `equation.txt`, `curve.csv`,
 `term_effects.csv` and `group_shares.csv` under `<output>/flexfl/<slug>/`, and with
-`--baselines` also `baseline_comparison.csv` and `baseline_notes.txt`.
+`--baselines` or `--extrapolation` also `baseline_comparison.csv` and `baseline_notes.txt`.
 `--log-target` writes to `<output>/flexfl/<slug>-log1p/`.
 
 **One note on threading.** The inner loop is ~87k solves of matrices no larger than 32×32,

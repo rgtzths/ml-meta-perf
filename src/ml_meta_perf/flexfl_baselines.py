@@ -1,7 +1,7 @@
 """Baselines for a FlexFL target, scored beside its E3 equation under the same protocols.
 
-* **E3 (fixed form)**: the published fit's own scores. Its terms are chosen once, on every
-  row, so its held-out scores are an upper estimate.
+* **E3 (fixed form)**: the published fit's own scores, for the protocols E3 reports. Its terms
+  are chosen once, on every row, so its held-out scores are an upper estimate.
 * **E3 (form per fold)**: E3's term library, built once from every row's features, with the
   search re-run inside every held-out fold on the training rows' targets only, so no held-out
   outcome influences which terms are used. The length is the published fit's, chosen on every row.
@@ -38,8 +38,10 @@ each on its held-out rows only:
   each fold alone. Runs with another strategy are in no fold.
 
 Protocols E3 does not report itself get *E3 (fixed form)* rows from the published equation, its
-terms kept and its weights refit on each training fold. A protocol with an empty side, or a
-corpus missing a strategy, is skipped with a note.
+terms kept and its weights refit on each training fold. Those terms were chosen with the
+held-out rows' targets in view, so these rows are an upper estimate too; *E3 (form per fold)*
+is the row whose terms no held-out target chose. A protocol with an empty side, or a corpus
+missing a strategy, is skipped with a note.
 """
 
 from __future__ import annotations
@@ -104,9 +106,11 @@ class BaselineComparison:
     notes: tuple[str, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Fold:
-    """Fit on the ``train`` rows and predict the ``test`` rows; rows in neither are not scored."""
+    """Fit on the ``train`` rows and predict the ``test`` rows; rows in neither are not scored.
+
+    Folds compare and hash by identity, so protocols sharing a fold can share its fit."""
 
     train: np.ndarray
     test: np.ndarray
@@ -197,15 +201,24 @@ def in_sample(fit_predict: FitPredict, rows: int, bounds: tuple[float, float] | 
 
 
 def held_out(
-    fit_predict: FitPredict, truth: np.ndarray, protocol: Protocol, bounds: tuple[float, float] | None = None
+    fit_predict: FitPredict,
+    truth: np.ndarray,
+    protocol: Protocol,
+    bounds: tuple[float, float] | None = None,
+    fits: dict[Fold, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Every scored row's prediction from its fold's fit, NaN on the rows the protocol does not score.
 
     Predictions are clipped to the fold's training range when ``protocol.clip``, else to ``bounds``.
+    ``fits`` keeps each fold's unclipped predictions, so a fold already in it is not fitted again;
+    pass the same mapping only for the same ``fit_predict``.
     """
+    fits = {} if fits is None else fits
     predictions = np.full_like(truth, np.nan)
     for fold in protocol.folds:
-        held = fit_predict(fold.train, fold.test)
+        if fold not in fits:
+            fits[fold] = fit_predict(fold.train, fold.test)
+        held = fits[fold]
         if protocol.clip:
             held = np.clip(held, float(truth[fold.train].min()), float(truth[fold.train].max()))
         elif bounds is not None:
@@ -397,8 +410,11 @@ def epoch_predictions(
     columns = columns_as_arrays(frame, fitted.features)
     cap = columns_as_arrays(frame, (FLEXFL_EPOCH_CAP_COLUMN,))[FLEXFL_EPOCH_CAP_COLUMN]
     per_fold = fold_search(frame, fitted, epochs_truth, epochs_report.equation.n_terms, config)
+    fits: dict[Fold, np.ndarray] = {}
     predicted = {IN_SAMPLE: np.asarray(epochs_report.equation.equation.predict(columns), dtype=np.float64)} | {
-        label: held_out(per_fold, epochs_truth, protocol if isinstance(protocol, Protocol) else grouped(protocol))
+        label: held_out(
+            per_fold, epochs_truth, protocol if isinstance(protocol, Protocol) else grouped(protocol), fits=fits
+        )
         for label, protocol in protocols.items()
     }
     return {label: np.clip(values, 1.0, cap) for label, values in predicted.items()}
@@ -461,6 +477,7 @@ def run_baselines(
     design = np.column_stack([features[name] for name in fitted.features])
     e3 = report.equation
     fixed: FitPredict | None = None
+    fixed_fits: dict[Fold, np.ndarray] = {}
 
     rows: list[dict[str, object]] = [
         {"model": "E3 (fixed form)", "protocol": IN_SAMPLE, **{k: e3.in_sample[k] for k in ("r2", "mae", "n")}}
@@ -471,12 +488,17 @@ def run_baselines(
             rows.append({"model": "E3 (fixed form)", "protocol": label, **reported})
         else:
             fixed = fixed or fold_fixed_form(e3.equation, features, truth, config.penalty)
-            predicted = held_out(fixed, truth, protocol, schema.bounds)
+            predicted = held_out(fixed, truth, protocol, schema.bounds, fixed_fits)
             rows.append(_held_out_scores("E3 (fixed form)", label, truth, predicted, protocol))
     per_fold = fold_search(frame, fitted, truth, e3.n_terms, config)
+    per_fold_fits: dict[Fold, np.ndarray] = {}
     rows += [
         _held_out_scores(
-            "E3 (form per fold)", label, truth, held_out(per_fold, truth, protocol, schema.bounds), protocol
+            "E3 (form per fold)",
+            label,
+            truth,
+            held_out(per_fold, truth, protocol, schema.bounds, per_fold_fits),
+            protocol,
         )
         for label, protocol in protocols.items()
     ]
@@ -486,8 +508,11 @@ def run_baselines(
     }
     for name, fit_predict in learned.items():
         rows.append(_scores(name, IN_SAMPLE, truth, in_sample(fit_predict, truth.shape[0], schema.bounds)))
+        fits: dict[Fold, np.ndarray] = {}
         rows += [
-            _held_out_scores(name, label, truth, held_out(fit_predict, truth, protocol, schema.bounds), protocol)
+            _held_out_scores(
+                name, label, truth, held_out(fit_predict, truth, protocol, schema.bounds, fits), protocol
+            )
             for label, protocol in protocols.items()
         ]
 
