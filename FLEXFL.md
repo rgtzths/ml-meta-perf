@@ -73,8 +73,10 @@ skipped. Every model is scored on the fitted scale, `log1p` with `--log-target`.
 predictions are bounded only by the target's bounds, as E3's are. Held-out predictions of
 every fitted model are clipped to the training fold's range, as E3's are.
 
-- `E3 (fixed form)`: the E3 fit's own scores. Its terms are chosen once, on every row, so its
-  LODO and LOMO scores are an upper estimate of transfer.
+- `E3 (fixed form)`: the E3 fit's own scores in-sample and under LODO and LOMO; under any
+  other protocol its published terms refit per fold, as [Extrapolation](#extrapolation)
+  describes. Its terms are chosen once, on every row, so its held-out scores are an upper
+  estimate of transfer.
 - `E3 (form per fold)`: LODO and LOMO with E3's term library, built once from every row's
   features, and its search re-run on each training fold's targets, so no held-out outcome
   influences which terms are chosen. The length is the E3 fit's, which was chosen on every row.
@@ -99,6 +101,32 @@ every fitted model are clipped to the training fold's range, as E3's are.
   row has no `min_workers` or no `n_epochs`, or when a Centralized row has no `pool_batches`.
   Runs made before the sweep recorded `min_workers` have neither.
 
+## Extrapolation
+
+`--extrapolation` does what `--baselines` does and adds six protocols to the same table. Each is
+scored on its held-out rows only, so its `n` is the number of held-out runs.
+
+- `extrapolate_workers`: one fold, fitted on the runs with at most 34 workers (`num_workers`)
+  and scored on the runs with 36 to 56. `extrapolate_workers_unclipped` is the same fold with
+  the fitted models' predictions not clipped to the training range, since that clip caps the
+  cost a larger cluster can reach; for `performance` they stay within the target's bounds, as
+  E3's equation keeps its own. The analytic rows are never clipped, so they skip the
+  unclipped twin, which would repeat them, and appear under every other protocol.
+- `loo_distribution`: three folds, each fitted on two of iid, non_iid and dirichlet (the
+  `strategy` column) and scored on the third, pooled into one score. `holdout_iid`,
+  `holdout_non_iid` and `holdout_dirichlet` score each fold alone. Runs with any other
+  strategy are in no fold.
+
+Under these protocols, which E3 does not report itself, `E3 (fixed form)` keeps the published
+equation's terms and refits their weights on each training fold. The published equation is
+the pruned one, while E3's own LODO and LOMO scores refit the form before pruning. The term
+library and the equation length still come from every row, as for `E3 (form per fold)`. The
+published terms were chosen with the held-out runs' targets in view, the 36 to 56 worker runs
+included, so these `E3 (fixed form)` scores are an upper estimate too; `E3 (form per fold)` is
+the row whose terms no held-out target chose. A protocol whose fold has an empty side, or a
+corpus missing one of the three strategies, is skipped with a note on stderr and in
+`baseline_notes.txt`.
+
 ## Commands
 
 ```bash
@@ -108,6 +136,9 @@ ml-meta-perf --target total_time_s --log-target --data meta_dataset.csv
 
 # the same fit plus the baselines; adds baseline_comparison.csv
 ml-meta-perf --target comm_bytes_total --log-target --data meta_dataset.csv --baselines
+
+# the baselines plus the worker-count and distribution protocols, in the same files
+ml-meta-perf --target comm_bytes_total --log-target --data meta_dataset.csv --extrapolation
 
 # the configuration sweep on the same target
 ml-meta-perf-search --target total_time_s --log-target --data meta_dataset.csv --output results/sweep_time

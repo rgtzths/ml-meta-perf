@@ -239,7 +239,7 @@ adopting it is a reviewed edit to `config/study.json`.
 
 FlexFL targets are available in both commands; see [the FlexFL guide](FLEXFL.md). The study CLI writes `equation.json`, `equation.txt`, `curve.csv`,
 `term_effects.csv` and `group_shares.csv` under `<output>/flexfl/<slug>/`, and with
-`--baselines` also `baseline_comparison.csv` and `baseline_notes.txt`.
+`--baselines` or `--extrapolation` also `baseline_comparison.csv` and `baseline_notes.txt`.
 `--log-target` writes to `<output>/flexfl/<slug>-log1p/`.
 
 **One note on threading.** The inner loop is ~87k solves of matrices no larger than 32×32,
@@ -286,6 +286,7 @@ Run options are ordinary flags:
 | `--task-type` | none | restrict a FlexFL target to classification or regression; required for performance |
 | `--log-target` | off | fit `log1p` of a cost target; metrics on the log scale; outputs under `flexfl/<slug>-log1p/` |
 | `--baselines` | off | FlexFL targets: also score the mean, gradient-boosting and analytic baselines; see [the FlexFL guide](FLEXFL.md) |
+| `--extrapolation` | off | FlexFL targets: `--baselines` plus the worker-count and leave-one-distribution-out protocols; see [the FlexFL guide](FLEXFL.md) |
 | `--output` | `results` | where the equations and comma-separated value (CSV) tables go |
 | `--figures` | `assets/figures` | where the figures go |
 | `--docs` | `assets/docs` | chapter directory whose generated sections are rewritten |

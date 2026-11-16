@@ -592,7 +592,10 @@ class SchemaError(ValueError):
 
 
 def load(
-    path: str | Path | None = None, schema: Schema = MCC_SCHEMA, extra_columns: tuple[str, ...] = ()
+    path: str | Path | None = None,
+    schema: Schema = MCC_SCHEMA,
+    extra_columns: tuple[str, ...] = (),
+    label_columns: tuple[str, ...] = (),
 ) -> pl.DataFrame:
     """Read the meta-dataset and check it has the expected shape.
 
@@ -603,7 +606,8 @@ def load(
 
     ``extra_columns`` that the CSV has are kept after the schema's columns, cast to Float64
     and not null-checked; ones it lacks are left out, and ones the schema already selects are
-    ignored. They change neither the rows kept nor their order.
+    ignored. They change neither the rows kept nor their order. ``label_columns`` follow the
+    same rules but are kept as strings, after the extras.
     """
     resolved = Path(path) if path is not None else DEFAULT_PATH
     if not resolved.is_file():
@@ -639,13 +643,17 @@ def load(
         raise SchemaError(f"missing columns: {missing}")
 
     extras = tuple(dict.fromkeys(c for c in extra_columns if c in frame.columns and c not in expected))
-    frame = frame.select(*expected, *extras).with_columns(
+    labels = tuple(
+        dict.fromkeys(c for c in label_columns if c in frame.columns and c not in expected and c not in extras)
+    )
+    frame = frame.select(*expected, *extras, *labels).with_columns(
         [pl.col(column).cast(pl.Float64) for column in (*schema.features, schema.target_column, *extras)]
+        + [pl.col(column).cast(pl.String) for column in labels]
     )
 
     droppable = schema.target_column in FLEXFL_DECOMPOSITION_TARGETS
     checked = frame.drop(schema.target_column) if droppable else frame
-    checked = checked.drop(extras)
+    checked = checked.drop(*extras, *labels)
     nulls = sum(checked.null_count().row(0))
     if nulls:
         raise SchemaError(f"meta-dataset contains {nulls} null values")

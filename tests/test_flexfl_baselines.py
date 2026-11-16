@@ -461,7 +461,7 @@ class RunBaselinesTest(unittest.TestCase):
         workers = frame["num_workers"].to_numpy()
         halves = np.where(workers > np.median(workers), "big", "small")
         table = run_baselines(FIXTURE, schema, TINY, splits={"by_size": halves}).table
-        self.assertEqual(models(table.filter(pl.col("protocol") == "by_size")), {"E3 (form per fold)"} | LEARNED)
+        self.assertEqual(models(table.filter(pl.col("protocol") == "by_size")), E3 | LEARNED)
         truth = target(frame, schema)
         self.assertAlmostEqual(
             cell(table, "mean", "by_size", "r2"),
