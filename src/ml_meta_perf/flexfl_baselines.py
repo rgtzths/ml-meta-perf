@@ -10,9 +10,9 @@
   ``config/study.json``'s ``opaque`` block, untuned, with the MCC study's seed.
 * **analytic**: ``comm_bytes_total`` only, with no fitted constant. A model-sized message
   carries its pickled size, ``{"type": <task>, "data": <float32 weights>}`` at pickle protocol
-  4, as FlexFL's Raw message layer sends it; control messages are left out. The master exchanges
-  one message each way per pool worker per round. A
-  DecentralizedSync round is one epoch; a CentralizedSync round covers ``min_workers`` of the
+  4, as FlexFL's Raw message layer sends it, with ``<task>`` one of FlexFL's small-int ``Task``
+  ids; control messages are left out. The master exchanges one message each way per pool
+  worker per round. A DecentralizedSync round is one epoch; a CentralizedSync round covers ``min_workers`` of the
   ``pool_batches`` batches in an epoch, so a run needs ``ceil(epochs * pool_batches /
   min_workers)`` rounds; a synchronous run stopped early, below ``epoch_cap``, runs one more
   round before it stops. The asynchronous algorithms exchange one message each way per
@@ -181,7 +181,8 @@ def analytic_messages(
 def message_bytes(total_parameters: np.ndarray) -> np.ndarray:
     """Bytes of one model-sized FlexFL message: its Raw message layer's pickle of
     ``{"type": <task>, "data": <float32 weights>}``, at the protocol FlexFL's Python 3.12
-    workers pickle with."""
+    workers pickle with. ``<task>`` is FlexFL's ``Task.WORK`` (0) or ``Task.WORK_DONE`` (1),
+    which pickle to the same length."""
     sizes, inverse = np.unique(np.asarray(total_parameters, dtype=np.int64), return_inverse=True)
     one = [
         len(pickle.dumps({"type": 0, "data": np.zeros(int(size), np.float32)}, protocol=FLEXFL_PICKLE_PROTOCOL))

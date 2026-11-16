@@ -108,11 +108,14 @@ class AnalyticModelTest(unittest.TestCase):
             self.assertEqual(baselines.message_bytes(np.array([float(parameters)]))[0], expected)
         self.assertEqual(baselines.message_bytes(np.array([[73.0], [10.0]])).shape, (2, 1))
 
+    def test_unsorted_repeated_sizes_keep_their_rows(self) -> None:
+        np.testing.assert_array_equal(baselines.message_bytes(np.array([73.0, 10.0, 73.0])), [463.0, 208.0, 463.0])
+
     def test_the_message_size_pins_the_workers_pickle_protocol(self) -> None:
         with mock.patch.object(baselines.pickle, "dumps", wraps=pickle.dumps) as dumps:
             baselines.message_bytes(np.array([73.0, 73.0, 10.0]))
         self.assertEqual(dumps.call_count, 2)
-        self.assertEqual([call.kwargs["protocol"] for call in dumps.call_args_list], [4, 4])
+        self.assertEqual([call.kwargs.get("protocol") for call in dumps.call_args_list], [4, 4])
 
     def test_unknown_algorithm_is_rejected(self) -> None:
         ones = np.ones(1)
