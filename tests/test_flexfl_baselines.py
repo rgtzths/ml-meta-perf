@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import io
+import pickle
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -82,18 +83,36 @@ class AnalyticModelTest(unittest.TestCase):
         return analytic_comm_bytes(ALGOS, n_epochs * ones, epoch_cap * ones, workers * ones, pool * ones, 10 * ones)
 
     def test_bytes_per_algorithm_at_the_epoch_cap(self) -> None:
-        np.testing.assert_array_equal(self.bytes(3, 3, 4, 7), [1920.0, 1920.0, 960.0, 1200.0])
+        np.testing.assert_array_equal(self.bytes(3, 3, 4, 7), [9984.0, 9984.0, 4992.0, 6240.0])
 
     def test_an_early_stop_adds_one_synchronous_round(self) -> None:
-        np.testing.assert_array_equal(self.bytes(3, 5, 4, 7), [2240.0, 1920.0, 1280.0, 1200.0])
+        np.testing.assert_array_equal(self.bytes(3, 5, 4, 7), [11648.0, 9984.0, 6656.0, 6240.0])
 
     def test_centralized_sync_rounds_up_to_whole_pools(self) -> None:
-        self.assertEqual(self.bytes(1, 1, 2, 5)[0], 480.0)
+        self.assertEqual(self.bytes(1, 1, 2, 5)[0], 2496.0)
 
     def test_decentralized_rows_ignore_pool_batches(self) -> None:
         twos = np.full(2, 2.0)
         predicted = analytic_comm_bytes(ALGOS[2:], twos, twos, np.full(2, 4.0), np.full(2, np.nan), np.full(2, 10.0))
-        np.testing.assert_array_equal(predicted, [640.0, 880.0])
+        np.testing.assert_array_equal(predicted, [3328.0, 4576.0])
+
+    def test_a_message_is_the_pickled_payload(self) -> None:
+        sizes = np.array([10.0, 73.0, 16383.0, 16384.0, 96278.0])
+        np.testing.assert_array_equal(
+            baselines.message_bytes(sizes), [208.0, 463.0, 65704.0, 65717.0, 385295.0]
+        )
+        for parameters in (10, 96278):
+            expected = len(
+                pickle.dumps({"type": 1, "data": np.ones(parameters, np.float32)}, protocol=4)
+            )
+            self.assertEqual(baselines.message_bytes(np.array([float(parameters)]))[0], expected)
+        self.assertEqual(baselines.message_bytes(np.array([[73.0], [10.0]])).shape, (2, 1))
+
+    def test_the_message_size_pins_the_workers_pickle_protocol(self) -> None:
+        with mock.patch.object(baselines.pickle, "dumps", wraps=pickle.dumps) as dumps:
+            baselines.message_bytes(np.array([73.0, 73.0, 10.0]))
+        self.assertEqual(dumps.call_count, 2)
+        self.assertEqual([call.kwargs["protocol"] for call in dumps.call_args_list], [4, 4])
 
     def test_unknown_algorithm_is_rejected(self) -> None:
         ones = np.ones(1)
