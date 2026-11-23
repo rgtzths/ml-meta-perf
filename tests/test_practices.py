@@ -120,6 +120,26 @@ class TestFeatureEvidence(unittest.TestCase):
         self.assertEqual(rows["selected"]["frequency"], 0.875)
         self.assertEqual((rows["never"]["folds"], rows["never"]["frequency"]), (0, 0.0))
 
+    def test_a_decreasing_feature_passes_with_a_negative_difference(self) -> None:
+        table = feature_evidence(
+            rising_equation(),
+            columns(),
+            stability_table(up=1.0, down=1.0),
+            margin=0.05,
+            min_direction=0.15,
+            min_frequency=0.5,
+        )
+        rows = {row["feature"]: row for row in table.iter_rows(named=True)}
+        self.assertAlmostEqual(rows["up"]["decile_difference"], 4 / 11)
+        self.assertAlmostEqual(rows["down"]["decile_difference"], -3.2 / 11)
+        self.assertLess(rows["down"]["spearman"], -0.99)
+        for feature in ("up", "down"):
+            self.assertTrue(rows[feature]["pass_margin"])
+            self.assertTrue(rows[feature]["pass_direction"])
+            self.assertTrue(rows[feature]["pass_sign"])
+            self.assertTrue(rows[feature]["pass_frequency"])
+            self.assertTrue(rows[feature]["passes_all"])
+
     def test_feature_filters_report_each_evidence_gate(self) -> None:
         equation = Equation(
             intercept=0.0,

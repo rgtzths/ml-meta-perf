@@ -766,10 +766,11 @@ class FlexFLSchemaTests(unittest.TestCase):
         self.assertFalse(strict_features["pass_frequency"].any())
         self.assertFalse(strict_features["passes_all"].any())
 
-        relaxed = dataclasses.replace(defaults, min_direction=0.0, min_frequency=0.0)
-        relaxed_features = experiment.run_flexfl(FIXTURE, schema, TINY, effects_config=relaxed).features
+        def flags(config: EffectsConfig) -> dict[str, dict[str, object]]:
+            table = experiment.run_flexfl(FIXTURE, schema, TINY, effects_config=config).features
+            return {row["feature"]: row for row in table.iter_rows(named=True)}
+
         default_rows = {row["feature"]: row for row in default.iter_rows(named=True)}
-        relaxed_rows = {row["feature"]: row for row in relaxed_features.iter_rows(named=True)}
         direction_failures = [
             feature
             for feature, row in default_rows.items()
@@ -778,12 +779,32 @@ class FlexFLSchemaTests(unittest.TestCase):
         frequency_failures = [feature for feature, row in default_rows.items() if not row["pass_frequency"]]
         self.assertTrue(direction_failures)
         self.assertTrue(frequency_failures)
-        direction_feature = direction_failures[0]
-        frequency_feature = frequency_failures[0]
-        self.assertFalse(default_rows[direction_feature]["pass_direction"])
-        self.assertTrue(relaxed_rows[direction_feature]["pass_direction"])
-        self.assertFalse(default_rows[frequency_feature]["pass_frequency"])
-        self.assertTrue(relaxed_rows[frequency_feature]["pass_frequency"])
+
+        direction_only = flags(dataclasses.replace(defaults, min_direction=0.0))
+        for feature, row in direction_only.items():
+            self.assertEqual(row["pass_frequency"], default_rows[feature]["pass_frequency"])
+            self.assertEqual(row["pass_margin"], default_rows[feature]["pass_margin"])
+        for feature in direction_failures:
+            self.assertTrue(direction_only[feature]["pass_direction"])
+
+        frequency_only = flags(dataclasses.replace(defaults, min_frequency=0.0))
+        for feature, row in frequency_only.items():
+            self.assertEqual(row["pass_direction"], default_rows[feature]["pass_direction"])
+            self.assertEqual(row["pass_margin"], default_rows[feature]["pass_margin"])
+        for feature in frequency_failures:
+            self.assertTrue(frequency_only[feature]["pass_frequency"])
+
+        key = experiment.margin_key(schema)
+        huge = dataclasses.replace(defaults, decile_margin={**defaults.decile_margin, key: 1e9})
+        huge_rows = flags(huge)
+        self.assertTrue(default_rows)
+        for feature, row in huge_rows.items():
+            self.assertEqual(row["margin"], 1e9)
+            self.assertFalse(row["pass_margin"])
+            self.assertFalse(row["passes_all"])
+            self.assertEqual(row["pass_direction"], default_rows[feature]["pass_direction"])
+            self.assertEqual(row["pass_frequency"], default_rows[feature]["pass_frequency"])
+        self.assertTrue(any(row["pass_margin"] for row in default_rows.values()))
 
     def test_n_epochs_cli_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
