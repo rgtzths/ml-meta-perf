@@ -502,6 +502,13 @@ class FlexFLSchemaTests(unittest.TestCase):
             folder = out / "flexfl" / "comm_bytes_total-log1p"
             for name in ("equation.json", "equation.txt", "curve.csv", "term_effects.csv", "group_shares.csv"):
                 self.assertTrue((folder / name).is_file(), name)
+            shares = pl.read_csv(folder / "group_shares.csv")
+            effects = pl.read_csv(folder / "term_effects.csv")
+            self.assertEqual(
+                shares["group"].to_list(),
+                ["dataset", "architecture", "fl_config", "federation", "mixed"],
+            )
+            self.assertIn("blocks", effects.columns)
             self.assertTrue((folder / "equation.txt").read_text().startswith("log1p(comm_bytes_total) = "))
             self.assertIsNone(Equation.load(folder / "equation.json").bounds)
             self.assertTrue(
@@ -605,10 +612,18 @@ class FlexFLSchemaTests(unittest.TestCase):
         for term in result.equation.equation.terms:
             self.assertTrue(set(term.features).isdisjoint(DROPPED))
         self.assertGreater(result.effects.height, 0)
+        self.assertIn("blocks", result.effects.columns)
+        self.assertTrue(set(result.effects["group"].to_list()).issubset(
+            {"dataset", "architecture", "fl_config", "federation", "mixed"}
+        ))
         for row in result.effects.iter_rows(named=True):
             expected = "raises" if row["beta"] > 0 else "lowers"
             self.assertEqual(row["direction"], f"{expected} comm_bytes_total")
         shares = result.shares["share"]
+        self.assertEqual(
+            result.shares["group"].to_list(),
+            ["dataset", "architecture", "fl_config", "federation", "mixed"],
+        )
         self.assertTrue(abs(shares.sum() - 1) < 1e-9 or all(value == 0 for value in shares))
 
     def test_study_cli_argument_errors(self) -> None:

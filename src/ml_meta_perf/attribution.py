@@ -13,6 +13,9 @@ labelled by the features they use -- dataset-only, model-only, or mixed -- so th
 between "how hard is this data" and "how capable is this model" can be read off the
 fitted equation rather than assumed.
 
+FlexFL also reports term effects and covariance shares across dataset, architecture, FL
+configuration and federation blocks.
+
 Study chapter: [6. Best practices against the equation][study-chapter] -- the rationale, in
 prose, with the figures.
 
@@ -24,11 +27,80 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+from ml_meta_perf.data import FLEXFL_BLOCKS, flexfl_block
 from ml_meta_perf.model import Equation, direction
 
 DATASET_ONLY = "dataset"
 MODEL_ONLY = "model"
 MIXED = "mixed"
+_BLOCK_GROUPS = (*FLEXFL_BLOCKS, MIXED)
+
+
+def classify_blocks(features: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
+    """Label a term by its FlexFL blocks and return the span in block order."""
+    if not features:
+        raise ValueError("a FlexFL term must use at least one feature")
+    feature_blocks = {flexfl_block(feature) for feature in features}
+    spans = tuple(block for block in FLEXFL_BLOCKS if block in feature_blocks)
+    return (spans[0], spans) if len(spans) == 1 else (MIXED, spans)
+
+
+def block_effects(equation: Equation, columns: dict[str, np.ndarray]) -> pl.DataFrame:
+    """Report each FlexFL term's weighted contribution range and block span."""
+    schema = {
+        "term": pl.String,
+        "group": pl.String,
+        "blocks": pl.String,
+        "weight": pl.Float64,
+        "beta": pl.Float64,
+        "effect": pl.Float64,
+        "direction": pl.String,
+    }
+    matrix = contributions(equation, columns)
+    rows: list[dict[str, object]] = []
+    for index, term in enumerate(equation.terms):
+        group, spans = classify_blocks(term.features)
+        low, high = np.percentile(matrix[:, index], [10.0, 90.0])
+        rows.append(
+            {
+                "term": term.name,
+                "group": group,
+                "blocks": "+".join(spans),
+                "weight": equation.weights[index],
+                "beta": equation.standardized_weights[index],
+                "effect": float(high - low),
+                "direction": direction(equation.standardized_weights[index]),
+            }
+        )
+    return pl.DataFrame(rows, schema=schema).sort(pl.col("effect").abs(), descending=True)
+
+
+def block_shares(equation: Equation, columns: dict[str, np.ndarray]) -> pl.DataFrame:
+    """Report FlexFL output variance shares across its four blocks and mixed terms."""
+    matrix = contributions(equation, columns)
+    total = matrix.sum(axis=1)
+    variance = float(np.var(total))
+    labels = [classify_blocks(term.features)[0] for term in equation.terms]
+
+    rows: list[dict[str, object]] = []
+    for group in _BLOCK_GROUPS:
+        selected = [index for index, label in enumerate(labels) if label == group]
+        if not selected:
+            rows.append({"group": group, "n_terms": 0, "share": 0.0, "effect_sum": 0.0})
+            continue
+        subtotal = matrix[:, selected].sum(axis=1)
+        covariance = float(((subtotal - subtotal.mean()) * (total - total.mean())).mean())
+        share = covariance / variance if variance > 1e-15 else 0.0
+        low, high = np.percentile(subtotal, [10.0, 90.0])
+        rows.append(
+            {
+                "group": group,
+                "n_terms": len(selected),
+                "share": share,
+                "effect_sum": float(high - low),
+            }
+        )
+    return pl.DataFrame(rows)
 
 
 def classify(

@@ -435,6 +435,67 @@ FLEXFL_MODEL_FEATURES: tuple[str, ...] = (
     "worker_rate_std",
     "worker_rate_cv",
 )
+FLEXFL_BLOCKS: dict[str, tuple[str, ...]] = {
+    "dataset": (
+        "n_samples",
+        "n_features",
+        "n_classes",
+        "is_classification",
+        "is_categorical",
+    ),
+    "architecture": (
+        "total_parameters",
+        "n_layers",
+        "mean_layer_width",
+        "max_layer_width",
+        "weight_decay",
+    ),
+    "fl_config": (
+        "fl_algo_CentralizedSync",
+        "fl_algo_CentralizedAsync",
+        "fl_algo_DecentralizedSync",
+        "fl_algo_DecentralizedAsync",
+        "strategy_iid",
+        "strategy_non_iid",
+        "strategy_dirichlet",
+        "learning_rate",
+        "batch_size",
+        "patience",
+        "delta",
+        "local_epochs",
+        FLEXFL_EPOCH_CAP_COLUMN,
+        "alpha",
+        "distribution_percentage",
+        "feat_entropy_mean",
+        "feat_entropy_min",
+        "feat_entropy_max",
+        "feat_entropy_std",
+    ),
+    "federation": (
+        "num_workers",
+        "n_atnog_test1",
+        "n_hobbit",
+        "n_samwise",
+        "worker_rate_mean",
+        "worker_rate_min",
+        "worker_rate_max",
+        "worker_rate_std",
+        "worker_rate_cv",
+    ),
+}
+_FLEXFL_FEATURE_BLOCK = {
+    feature: block for block, features in FLEXFL_BLOCKS.items() for feature in features
+}
+
+
+def flexfl_block(feature: str) -> str:
+    """Return the FlexFL block assigned to a feature."""
+    try:
+        return _FLEXFL_FEATURE_BLOCK[feature]
+    except KeyError:
+        raise ValueError(f"unknown FlexFL feature {feature!r}") from None
+
+
 SMAPE_LOWER = 0.0
 SMAPE_UPPER = 2.0
 FLEXFL_PERFORMANCE_BOUNDS: dict[str, tuple[float, float]] = {
