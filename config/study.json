@@ -20,6 +20,21 @@
     "boosting_learning_rate": 0.1,
     "boosting_max_depth": 3
   },
+  "effects": {
+    "decile_margin": {
+      "total_time_s-log1p": 0.10,
+      "comm_bytes_total-log1p": 0.10,
+      "compute_time_total_s-log1p": 0.10,
+      "compute_time_max_s-log1p": 0.10,
+      "comm_time_total_s-log1p": 0.10,
+      "validation_time_s-log1p": 0.10,
+      "n_epochs": 2.0,
+      "performance-classification": 0.02,
+      "performance-regression": 0.02
+    },
+    "min_direction": 0.15,
+    "min_frequency": 0.5
+  },
   "sweep": {
     "zscores": [3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0],
     "penalties": [0.1, 0.3, 1.0, 3.0, 10.0],

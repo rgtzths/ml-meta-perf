@@ -15,7 +15,7 @@ import numpy as np
 import polars as pl
 
 from ml_meta_perf import cli, experiment, sweep
-from ml_meta_perf.config import default_configuration, load_config
+from ml_meta_perf.config import EffectsConfig, default_configuration, load_config
 from ml_meta_perf.data import (
     ALL_FEATURES,
     FLEXFL_COST_TARGETS,
@@ -403,7 +403,12 @@ class FlexFLSchemaTests(unittest.TestCase):
         )
         for schema in schemas:
             with self.subTest(schema=schema), mock.patch.object(experiment, "prune", wraps=experiment.prune) as spy:
-                experiment.run_flexfl(FIXTURE, schema, TINY)
+                effects_config = (
+                    EffectsConfig({"comm_bytes_total": 0.1}, min_direction=0.15, min_frequency=0.5)
+                    if schema.target_column == "comm_bytes_total" and not schema.log_target
+                    else None
+                )
+                experiment.run_flexfl(FIXTURE, schema, TINY, effects_config=effects_config)
                 actual = spy.call_args.kwargs["min_contribution"]
                 truth = target(load(FIXTURE, schema), schema)
                 expected = pruning_threshold(schema.bounds, truth)
@@ -495,6 +500,8 @@ class FlexFLSchemaTests(unittest.TestCase):
                 "--output",
                 str(out),
                 "--quiet",
+                "--effects.decile_margin",
+                '{"comm_bytes_total":0.1,"comm_bytes_total-log1p":0.1}',
                 *TINY_FLAGS,
             ]
             self.assertEqual(cli.main(argv), 0)
@@ -599,7 +606,12 @@ class FlexFLSchemaTests(unittest.TestCase):
         self.assertTrue(np.all((bounded >= -1.0) & (bounded <= 1.0)))
 
     def test_run_flexfl_on_a_cost_target(self) -> None:
-        result = experiment.run_flexfl(FIXTURE, flexfl_schema("comm_bytes_total"), TINY)
+        result = experiment.run_flexfl(
+            FIXTURE,
+            flexfl_schema("comm_bytes_total"),
+            TINY,
+            effects_config=EffectsConfig({"comm_bytes_total": 0.1}, min_direction=0.15, min_frequency=0.5),
+        )
         self.assertIsNone(result.equation.equation.bounds)
         self.assertNotIn("alpha", result.schema.features)
         for term in result.equation.equation.terms:
@@ -625,7 +637,8 @@ class FlexFLSchemaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
             code = cli.main([
-                "--target", "comm_bytes_total", "--data", str(FIXTURE), "--output", str(out), "--quiet", *TINY_FLAGS,
+                "--target", "comm_bytes_total", "--data", str(FIXTURE), "--output", str(out), "--quiet",
+                "--effects.decile_margin", '{"comm_bytes_total":0.1}', *TINY_FLAGS,
             ])
             self.assertEqual(code, 0)
             folder = out / "flexfl" / "comm_bytes_total"
@@ -717,6 +730,16 @@ class FlexFLSchemaTests(unittest.TestCase):
         self.assertIsNone(result.equation.equation.bounds)
         self.assertNotIn("log1p", result.equation.equation.name)
         self.assertGreater(result.effects.height, 0)
+        terms = getattr(result, "terms", None)
+        features = getattr(result, "features", None)
+        self.assertIsNotNone(terms, "FlexFLReport must expose term frequencies")
+        self.assertIsNotNone(features, "FlexFLReport must expose feature evidence")
+        assert terms is not None
+        assert features is not None
+        self.assertTrue(terms["frequency"].is_between(0.0, 1.0).all())
+        self.assertTrue((terms["folds"] <= terms["searches"]).all())
+        expected_features = {feature for term in result.equation.equation.terms for feature in term.features}
+        self.assertEqual(set(features["feature"].to_list()), expected_features)
         for row in result.effects.iter_rows(named=True):
             expected = "raises" if row["beta"] > 0 else "lowers"
             self.assertEqual(row["direction"], f"{expected} n_epochs")

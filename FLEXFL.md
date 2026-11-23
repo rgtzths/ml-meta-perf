@@ -63,6 +63,26 @@ training row, so its terms get no weight there. FlexFL LOMO R² therefore measur
 to an unseen algorithm without per-algorithm offsets, and it is not comparable with the MCC
 study's LOMO, whose model features are descriptors shared across models.
 
+## Reselection and feature evidence
+
+Each fit writes `term_frequency.csv` and `feature_evidence.csv` beside the equation. The term
+frequency table has one row per equation term, with its weight, coefficient, decile effect,
+direction, number of dataset exclusions that reselected it (`folds`), number of datasets
+searched, and `frequency = folds / searches`. A term never reselected has frequency zero.
+
+The feature evidence table reports each feature's signed top-minus-bottom decile difference,
+Spearman correlation, mean term frequency, the configured margin, and each filter result. A
+feature passes the margin, direction, and frequency filters when the absolute decile difference
+is at least the target's margin, the absolute Spearman correlation is at least 0.15, and its
+mean term frequency is at least 0.5. It passes the sign filter when both values are nonzero and
+their signs match. `passes_all` is true only when all four filters pass. Equality passes each
+numeric filter, matching the MCC study's `>=` rule.
+
+Margins are in the fitted target scale and come from the `effects.decile_margin` section of
+`config/study.json`. Performance has a separate margin for classification and regression. Cost
+targets use the raw target key or the `-log1p` key according to the fitted scale. A target with
+no configured margin needs an explicit `--effects` configuration.
+
 ## Baselines
 
 `--baselines` scores these beside the E3 fit, in-sample and under LODO and LOMO, and writes
@@ -132,8 +152,8 @@ corpus missing one of the three strategies, is skipped with a note on stderr and
 ## Commands
 
 ```bash
-# one E3 fit; writes equation.json, equation.txt, curve.csv, term_effects.csv and
-# group_shares.csv under results/flexfl/<slug>/
+# one E3 fit; also writes term_frequency.csv and feature_evidence.csv under
+# results/flexfl/<slug>/
 ml-meta-perf --target total_time_s --log-target --data meta_dataset.csv
 
 # the same fit plus the baselines; adds baseline_comparison.csv

@@ -22,10 +22,13 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+import polars as pl
 from jsonargparse import Namespace
 
+import ml_meta_perf.cli as cli
 from ml_meta_perf.cli import PHASES, _configure_windows_output, build_parser, main, phases_of, render
 from ml_meta_perf.config import DEFAULT_CONFIG_PATH, load_config
 from ml_meta_perf.model import Equation
@@ -47,6 +50,8 @@ class TestFlags(unittest.TestCase):
         self.assertEqual(arguments.search, study.search)
         self.assertEqual(arguments.selection, study.selection)
         self.assertEqual(arguments.opaque, study.opaque)
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(arguments.effects, study.effects)
 
     def test_a_dotted_flag_overrides_one_field_of_the_file(self) -> None:
         arguments = parse("--search.penalty", "3", "--selection.delta", "0.02")
@@ -237,6 +242,95 @@ class TestWhatIsPrinted(CliTestCase):
         ):
             with self.subTest(section=expected):
                 self.assertIn(expected, printed)
+
+
+class TestFlexFLOutputs(unittest.TestCase):
+    def test_default_config_parses_effects(self) -> None:
+        with redirect_stderr(io.StringIO()):
+            try:
+                arguments = parse()
+            except SystemExit as error:
+                self.fail(f"the default configuration must parse effects: {error}")
+        self.assertEqual(arguments.effects, load_config().effects)
+
+    def test_flexfl_cli_writes_effect_tables_and_forwards_effect_config(self) -> None:
+        effects = pl.DataFrame(
+            {"term": ["up"], "weight": [0.1], "beta": [0.2], "effect": [0.08], "direction": [0.9]}
+        )
+        terms = effects.with_columns(
+            pl.lit(7).alias("folds"), pl.lit(8).alias("searches"), pl.lit(0.875).alias("frequency")
+        )
+        features = pl.DataFrame(
+            {
+                "feature": ["up"],
+                "meaning": ["up"],
+                "n_terms": [1],
+                "decile_difference": [0.08],
+                "spearman": [0.9],
+                "mean_frequency": [0.875],
+                "margin": [0.05],
+                "pass_margin": [True],
+                "pass_direction": [True],
+                "pass_sign": [True],
+                "pass_frequency": [True],
+                "passes_all": [True],
+            }
+        )
+        report = SimpleNamespace(
+            equation=SimpleNamespace(
+                equation=Equation(intercept=0.0, terms=(), weights=(), standardized_weights=()),
+                curve=pl.DataFrame(schema={"n_terms": pl.Int64}),
+                in_sample={},
+                cross_validated={},
+            ),
+            effects=effects,
+            shares=pl.DataFrame(schema={"group": pl.String, "share": pl.Float64}),
+            terms=terms,
+            features=features,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = Namespace(
+                target="n_epochs",
+                task_type=None,
+                log_target=False,
+                data=str(corpus.sample_path()),
+                search=load_config().search,
+                selection=load_config().selection,
+                effects=load_config().effects,
+                output=directory,
+                quiet=True,
+                baselines=False,
+                extrapolation=False,
+            )
+            with mock.patch.object(cli, "run_flexfl", return_value=report) as fitted:
+                cli._run_flexfl_cli(arguments)
+            folder = Path(directory) / "flexfl" / "n_epochs"
+            self.assertTrue((folder / "term_frequency.csv").is_file())
+            self.assertTrue((folder / "feature_evidence.csv").is_file())
+            term_table = pl.read_csv(folder / "term_frequency.csv")
+            feature_table = pl.read_csv(folder / "feature_evidence.csv")
+        self.assertEqual(
+            term_table.columns,
+            ["term", "weight", "beta", "effect", "direction", "folds", "searches", "frequency"],
+        )
+        self.assertEqual(
+            feature_table.columns,
+            [
+                "feature",
+                "meaning",
+                "n_terms",
+                "decile_difference",
+                "spearman",
+                "mean_frequency",
+                "margin",
+                "pass_margin",
+                "pass_direction",
+                "pass_sign",
+                "pass_frequency",
+                "passes_all",
+            ],
+        )
+        self.assertEqual(fitted.call_args.kwargs["effects_config"], arguments.effects)
 
 
 if __name__ == "__main__":

@@ -19,8 +19,8 @@ from sklearn.ensemble import GradientBoostingRegressor
 
 from ml_meta_perf import cli, experiment
 from ml_meta_perf import flexfl_baselines as baselines
-from ml_meta_perf.config import load_config
-from ml_meta_perf.data import columns_as_arrays, drop_constant_features, flexfl_schema, load, target
+from ml_meta_perf.config import Configuration, EffectsConfig, SelectionConfig, load_config
+from ml_meta_perf.data import Schema, columns_as_arrays, drop_constant_features, flexfl_schema, load, target
 from ml_meta_perf.flexfl_baselines import (
     ANALYTIC_COLUMNS,
     ORACLE,
@@ -50,6 +50,19 @@ SKIPPED = (
     "analytic baseline skipped: the corpus has no min_workers, pool_batches; "
     "re-assemble it with FlexFL's scripts/assemble_meta_dataset.py"
 )
+RAW_COMM_EFFECTS = EffectsConfig(
+    {"comm_bytes_total": 0.1, "n_epochs": 2.0}, min_direction=0.15, min_frequency=0.5
+)
+
+
+def raw_comm_report(path: Path, selection: SelectionConfig | None = None) -> experiment.FlexFLReport:
+    return experiment.run_flexfl(
+        path,
+        flexfl_schema("comm_bytes_total"),
+        TINY,
+        selection,
+        effects_config=RAW_COMM_EFFECTS,
+    )
 
 
 def with_analytic_columns(directory: Path, blank: str | None = None) -> Path:
@@ -361,7 +374,12 @@ class EpochPredictionsTest(unittest.TestCase):
 class RunBaselinesTest(unittest.TestCase):
     def test_comm_bytes_without_the_analytic_columns(self) -> None:
         schema = flexfl_schema("comm_bytes_total")
-        report = experiment.run_flexfl(FIXTURE, schema, TINY)
+        report = experiment.run_flexfl(
+            FIXTURE,
+            schema,
+            TINY,
+            effects_config=EffectsConfig({"comm_bytes_total": 0.1}, min_direction=0.15, min_frequency=0.5),
+        )
         comparison = run_baselines(FIXTURE, schema, TINY, report=report)
         table = comparison.table
         e3 = report.equation
@@ -446,7 +464,9 @@ class RunBaselinesTest(unittest.TestCase):
         ):
             with self.subTest(blank=blank), tempfile.TemporaryDirectory() as directory:
                 path = with_analytic_columns(Path(directory), blank=blank)
-                comparison = run_baselines(path, flexfl_schema("comm_bytes_total"), TINY)
+                comparison = run_baselines(
+                    path, flexfl_schema("comm_bytes_total"), TINY, report=raw_comm_report(path)
+                )
                 self.assertFalse(ANALYTIC & models(comparison.table))
                 self.assertEqual(comparison.notes, (note,))
 
@@ -457,7 +477,7 @@ class RunBaselinesTest(unittest.TestCase):
                 path = with_analytic_columns(Path(directory))
                 frame = pl.read_csv(path).select(pl.exclude(missing))
                 frame.write_csv(path)
-                comparison = run_baselines(path, schema, TINY)
+                comparison = run_baselines(path, schema, TINY, report=raw_comm_report(path))
                 expected_note = (
                     f"analytic baseline skipped: the corpus has no {missing}; "
                     "re-assemble it with FlexFL's scripts/assemble_meta_dataset.py"
@@ -482,7 +502,9 @@ class RunBaselinesTest(unittest.TestCase):
         frame = load(FIXTURE, schema)
         workers = frame["num_workers"].to_numpy()
         halves = np.where(workers > np.median(workers), "big", "small")
-        table = run_baselines(FIXTURE, schema, TINY, splits={"by_size": halves}).table
+        table = run_baselines(
+            FIXTURE, schema, TINY, report=raw_comm_report(FIXTURE), splits={"by_size": halves}
+        ).table
         self.assertEqual(models(table.filter(pl.col("protocol") == "by_size")), E3 | LEARNED)
         truth = target(frame, schema)
         self.assertAlmostEqual(
@@ -522,7 +544,16 @@ class RunBaselinesTest(unittest.TestCase):
             path = with_analytic_columns(Path(directory))
             selection = dataclasses.replace(load_config().selection, delta=0.031)
             real = baselines.run_flexfl
-            with mock.patch.object(baselines, "run_flexfl", wraps=real) as called:
+            def fit_with_margin(
+                path: str | Path,
+                schema: Schema,
+                config: Configuration | None = None,
+                selection: SelectionConfig | None = None,
+                name: str = "E3",
+            ) -> experiment.FlexFLReport:
+                return real(path, schema, config, selection, name, effects_config=RAW_COMM_EFFECTS)
+
+            with mock.patch.object(baselines, "run_flexfl", side_effect=fit_with_margin) as called:
                 run_baselines(path, flexfl_schema("comm_bytes_total"), TINY, selection, report=None)
         self.assertEqual([call.args[3] for call in called.call_args_list], [selection, selection])
 
@@ -536,7 +567,7 @@ class RunBaselinesTest(unittest.TestCase):
                 [pl.when(pl.int_range(pl.len()) == 0).then(0).otherwise(pl.col(name)).alias(name) for name in flags]
             )
             frame.write_csv(path)
-            comparison = run_baselines(path, schema, TINY)
+            comparison = run_baselines(path, schema, TINY, report=raw_comm_report(path))
         self.assertEqual(
             comparison.notes,
             ("analytic baseline skipped: a row does not mark exactly one fl_algo_* column",),
@@ -561,7 +592,10 @@ class BaselinesCliTest(unittest.TestCase):
     def run_cli(self, out: Path, *flags: str, data: Path = FIXTURE) -> tuple[str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
-        argv = ["--target", "comm_bytes_total", "--data", str(data), "--output", str(out), "--quiet"]
+        argv = [
+            "--target", "comm_bytes_total", "--data", str(data), "--output", str(out), "--quiet",
+            "--effects.decile_margin", '{"comm_bytes_total":0.1}',
+        ]
         with redirect_stdout(stdout), redirect_stderr(stderr):
             code = cli.main([*argv, *TINY_FLAGS, *flags])
         self.assertEqual(code, 0)

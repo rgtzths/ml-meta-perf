@@ -16,7 +16,7 @@ import polars as pl
 
 from ml_meta_perf import cli, experiment
 from ml_meta_perf import flexfl_baselines as baselines
-from ml_meta_perf.config import load_config
+from ml_meta_perf.config import EffectsConfig, load_config
 from ml_meta_perf.data import columns_as_arrays, flexfl_schema, load, target
 from ml_meta_perf.fit import Standardizer
 from ml_meta_perf.flexfl_baselines import (
@@ -38,7 +38,7 @@ from ml_meta_perf.flexfl_baselines import (
     run_baselines,
 )
 from ml_meta_perf.validate import score
-from tests.test_flexfl_baselines import cell, models, with_analytic_columns
+from tests.test_flexfl_baselines import cell, models, raw_comm_report, with_analytic_columns
 from tests.test_flexfl_schema import FIXTURE, TINY, TINY_FLAGS
 
 NEW = {
@@ -398,7 +398,12 @@ class RunBaselinesExtrapolationTest(unittest.TestCase):
 
     def test_an_extra_split_gets_the_refit_fixed_form(self) -> None:
         schema = flexfl_schema("comm_bytes_total")
-        report = experiment.run_flexfl(FIXTURE, schema, TINY)
+        report = experiment.run_flexfl(
+            FIXTURE,
+            schema,
+            TINY,
+            effects_config=EffectsConfig({"comm_bytes_total": 0.1}, min_direction=0.15, min_frequency=0.5),
+        )
         frame = load(FIXTURE, schema)
         workers = frame["num_workers"].to_numpy()
         halves = np.where(workers > np.median(workers), "big", "small")
@@ -453,7 +458,12 @@ class RunBaselinesExtrapolationTest(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "reserved for the extrapolation protocols"),
             ):
                 run_baselines(
-                    FIXTURE, flexfl_schema("comm_bytes_total"), TINY, splits={name: halves}, extrapolation=True
+                    FIXTURE,
+                    flexfl_schema("comm_bytes_total"),
+                    TINY,
+                    report=raw_comm_report(FIXTURE),
+                    splits={name: halves},
+                    extrapolation=True,
                 )
 
     def test_without_the_flag_the_table_is_unchanged(self) -> None:
@@ -466,7 +476,13 @@ class RunBaselinesExtrapolationTest(unittest.TestCase):
             run_baselines(self.path, self.schema, TINY, splits={"holdout_iid": halves}, extrapolation=True)
 
     def test_a_corpus_without_the_protocols_skips_them_with_notes(self) -> None:
-        comparison = run_baselines(FIXTURE, flexfl_schema("comm_bytes_total"), TINY, extrapolation=True)
+        comparison = run_baselines(
+            FIXTURE,
+            flexfl_schema("comm_bytes_total"),
+            TINY,
+            report=raw_comm_report(FIXTURE),
+            extrapolation=True,
+        )
         self.assertEqual(set(comparison.table["protocol"]), DEFAULT)
         self.assertEqual(
             comparison.notes[:2],
@@ -504,7 +520,10 @@ class RunBaselinesExtrapolationTest(unittest.TestCase):
 class ExtrapolationCliTest(unittest.TestCase):
     def run_cli(self, *flags: str, data: Path = FIXTURE, out: Path | None = None) -> tuple[str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
-        argv = ["--target", "comm_bytes_total", "--data", str(data), "--quiet"]
+        argv = [
+            "--target", "comm_bytes_total", "--data", str(data), "--quiet",
+            "--effects.decile_margin", '{"comm_bytes_total":0.1}',
+        ]
         argv += ["--output", str(out)] if out is not None else ["--output", ""]
         with redirect_stdout(stdout), redirect_stderr(stderr):
             code = cli.main([*argv, *TINY_FLAGS, *flags])

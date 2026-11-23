@@ -31,6 +31,7 @@ from jsonargparse import ActionConfigFile, ArgumentParser, Namespace  # pyright:
 from ml_meta_perf.config import (
     DEFAULT_CONFIG_PATH,
     Configuration,
+    EffectsConfig,
     OpaqueConfig,
     SelectionConfig,
     SweepConfig,
@@ -224,6 +225,7 @@ def build_parser() -> ArgumentParser:
     # overridden as a dotted flag, e.g. `--search.penalty 3`.
     parser.add_argument("--search", type=Configuration, help="search hyperparameters shared by E1, E2 and E3")
     parser.add_argument("--selection", type=SelectionConfig, help="the equation-length rule")
+    parser.add_argument("--effects", type=EffectsConfig, help="the FlexFL feature evidence filters")
     parser.add_argument("--opaque", type=OpaqueConfig, help="the opaque regressors' sizes")
     parser.add_argument("--sweep", type=SweepConfig, help="the grid `ml-meta-perf-search` explores (unused here)")
 
@@ -267,7 +269,13 @@ def _run_flexfl_cli(arguments: Namespace) -> int:
     """Fit one FlexFL E3 equation and write its outputs."""
     schema = flexfl_schema(arguments.target, arguments.task_type, arguments.log_target)
     started = time.perf_counter()
-    report = run_flexfl(arguments.data, schema, arguments.search, arguments.selection)
+    report = run_flexfl(
+        arguments.data,
+        schema,
+        arguments.search,
+        arguments.selection,
+        effects_config=arguments.effects,
+    )
     if not arguments.quiet:
         _section(f"E3: {schema.label}")
         print(equation_text(report.equation.equation, schema.label))
@@ -275,6 +283,8 @@ def _run_flexfl_cli(arguments: Namespace) -> int:
         for label, scores in report.equation.cross_validated.items():
             print(f"{PROTOCOL_LABELS.get(label, label)}: R2={scores['r2']:.3f}, MAE={scores['mae']:.3f}")
         _show(report.shares)
+        _show(report.terms)
+        _show(report.features)
     if arguments.output:
         destination = Path(arguments.output) / "flexfl" / schema.slug
         destination.mkdir(parents=True, exist_ok=True)
@@ -285,6 +295,8 @@ def _run_flexfl_cli(arguments: Namespace) -> int:
         report.equation.curve.write_csv(destination / "curve.csv")
         report.effects.write_csv(destination / "term_effects.csv")
         report.shares.write_csv(destination / "group_shares.csv")
+        report.terms.write_csv(destination / "term_frequency.csv")
+        report.features.write_csv(destination / "feature_evidence.csv")
         print(f"\nequation written to {destination}")
     if arguments.baselines or arguments.extrapolation:
         comparison = run_baselines(

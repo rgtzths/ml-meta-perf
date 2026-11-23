@@ -49,6 +49,7 @@ from jsonargparse import ActionConfigFile, ArgumentParser  # pyright: ignore[rep
 from ml_meta_perf.config import (
     DEFAULT_CONFIG_PATH,
     Configuration,
+    EffectsConfig,
     OpaqueConfig,
     SelectionConfig,
     StudyConfig,
@@ -169,6 +170,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--search", type=Configuration, help="the base configuration the grid varies")
     parser.add_argument("--selection", type=SelectionConfig, help="the length rule applied to every point")
     parser.add_argument("--opaque", type=OpaqueConfig, help="carried into the proposal unchanged")
+    parser.add_argument("--effects", type=EffectsConfig, help="the feature evidence filters")
     parser.add_argument("--sweep", type=SweepConfig, help="the grid and the choice among close candidates")
     parser.add_argument("--data", type=str | None, default=None, help="meta-dataset CSV")
     add_target_arguments(parser)
@@ -187,7 +189,11 @@ def main(argv: list[str] | None = None) -> int:
         else flexfl_schema(arguments.target, arguments.task_type, arguments.log_target)
     )
     study = StudyConfig(
-        search=arguments.search, selection=arguments.selection, opaque=arguments.opaque, sweep=arguments.sweep
+        search=arguments.search,
+        selection=arguments.selection,
+        opaque=arguments.opaque,
+        sweep=arguments.sweep,
+        effects=arguments.effects,
     )
     points = grid(study)
     output = Path(arguments.output)
