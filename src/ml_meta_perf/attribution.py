@@ -77,30 +77,8 @@ def block_effects(equation: Equation, columns: dict[str, np.ndarray]) -> pl.Data
 
 def block_shares(equation: Equation, columns: dict[str, np.ndarray]) -> pl.DataFrame:
     """Report FlexFL output variance shares across its four blocks and mixed terms."""
-    matrix = contributions(equation, columns)
-    total = matrix.sum(axis=1)
-    variance = float(np.var(total))
     labels = [classify_blocks(term.features)[0] for term in equation.terms]
-
-    rows: list[dict[str, object]] = []
-    for group in _BLOCK_GROUPS:
-        selected = [index for index, label in enumerate(labels) if label == group]
-        if not selected:
-            rows.append({"group": group, "n_terms": 0, "share": 0.0, "effect_sum": 0.0})
-            continue
-        subtotal = matrix[:, selected].sum(axis=1)
-        covariance = float(((subtotal - subtotal.mean()) * (total - total.mean())).mean())
-        share = covariance / variance if variance > 1e-15 else 0.0
-        low, high = np.percentile(subtotal, [10.0, 90.0])
-        rows.append(
-            {
-                "group": group,
-                "n_terms": len(selected),
-                "share": share,
-                "effect_sum": float(high - low),
-            }
-        )
-    return pl.DataFrame(rows)
+    return _covariance_shares(equation, columns, labels, _BLOCK_GROUPS)
 
 
 def classify(
@@ -124,6 +102,40 @@ def contributions(equation: Equation, columns: dict[str, np.ndarray]) -> np.ndar
         return np.column_stack(
             [weight * term.evaluate(columns) for term, weight in zip(equation.terms, equation.weights, strict=True)]
         )
+
+
+def _covariance_shares(
+    equation: Equation,
+    columns: dict[str, np.ndarray],
+    labels: list[str],
+    groups: tuple[str, ...],
+) -> pl.DataFrame:
+    matrix = contributions(equation, columns)
+    total = matrix.sum(axis=1)
+    variance = float(np.var(total))
+
+    rows: list[dict[str, object]] = []
+    for group in groups:
+        selected = [index for index, label in enumerate(labels) if label == group]
+        if not selected:
+            rows.append({"group": group, "n_terms": 0, "share": 0.0, "effect_sum": 0.0})
+            continue
+        subtotal = matrix[:, selected].sum(axis=1)
+        # Population covariance (ddof=0) to match np.var. np.cov defaults to ddof=1, and
+        # mixing the two inflates every share by n/(n-1) so the decomposition stops
+        # summing to 1.
+        covariance = float(((subtotal - subtotal.mean()) * (total - total.mean())).mean())
+        share = covariance / variance if variance > 1e-15 else 0.0
+        low, high = np.percentile(subtotal, [10.0, 90.0])
+        rows.append(
+            {
+                "group": group,
+                "n_terms": len(selected),
+                "share": share,
+                "effect_sum": float(high - low),
+            }
+        )
+    return pl.DataFrame(rows)
 
 
 def term_effects(
@@ -169,33 +181,8 @@ def group_shares(
     ``var(group) / var(total)`` does not -- and the groups here are correlated, because
     three of the model features are functions of dataset size.
     """
-    matrix = contributions(equation, columns)
-    total = matrix.sum(axis=1)
-    variance = float(np.var(total))
     labels = [classify(term.features, dataset_features, model_features) for term in equation.terms]
-
-    rows: list[dict[str, object]] = []
-    for group in (DATASET_ONLY, MODEL_ONLY, MIXED):
-        selected = [index for index, label in enumerate(labels) if label == group]
-        if not selected:
-            rows.append({"group": group, "n_terms": 0, "share": 0.0, "effect_sum": 0.0})
-            continue
-        subtotal = matrix[:, selected].sum(axis=1)
-        # Population covariance (ddof=0) to match np.var. np.cov defaults to ddof=1, and
-        # mixing the two inflates every share by n/(n-1) so the decomposition stops
-        # summing to 1.
-        covariance = float(((subtotal - subtotal.mean()) * (total - total.mean())).mean())
-        share = covariance / variance if variance > 1e-15 else 0.0
-        low, high = np.percentile(subtotal, [10.0, 90.0])
-        rows.append(
-            {
-                "group": group,
-                "n_terms": len(selected),
-                "share": share,
-                "effect_sum": float(high - low),
-            }
-        )
-    return pl.DataFrame(rows)
+    return _covariance_shares(equation, columns, labels, (DATASET_ONLY, MODEL_ONLY, MIXED))
 
 
 def variance_decomposition(

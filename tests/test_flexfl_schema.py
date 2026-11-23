@@ -509,6 +509,10 @@ class FlexFLSchemaTests(unittest.TestCase):
                 ["dataset", "architecture", "fl_config", "federation", "mixed"],
             )
             self.assertIn("blocks", effects.columns)
+            self.assertGreater(effects.height, 0)
+            for row in effects.iter_rows(named=True):
+                self.assertBlocksMatchGroup(row)
+            self.assertAlmostEqual(float(shares["share"].sum()), 1.0, delta=1e-6)
             self.assertTrue((folder / "equation.txt").read_text().startswith("log1p(comm_bytes_total) = "))
             self.assertIsNone(Equation.load(folder / "equation.json").bounds)
             self.assertTrue(
@@ -619,12 +623,23 @@ class FlexFLSchemaTests(unittest.TestCase):
         for row in result.effects.iter_rows(named=True):
             expected = "raises" if row["beta"] > 0 else "lowers"
             self.assertEqual(row["direction"], f"{expected} comm_bytes_total")
+        for row in result.effects.iter_rows(named=True):
+            self.assertBlocksMatchGroup(row)
         shares = result.shares["share"]
         self.assertEqual(
             result.shares["group"].to_list(),
             ["dataset", "architecture", "fl_config", "federation", "mixed"],
         )
-        self.assertTrue(abs(shares.sum() - 1) < 1e-9 or all(value == 0 for value in shares))
+        self.assertAlmostEqual(float(shares.sum()), 1.0, delta=1e-9)
+
+    def assertBlocksMatchGroup(self, row: dict[str, object]) -> None:
+        order = ("dataset", "architecture", "fl_config", "federation")
+        spans = str(row["blocks"]).split("+")
+        self.assertEqual(spans, [block for block in order if block in spans])
+        if len(spans) == 1:
+            self.assertEqual(row["group"], spans[0])
+        else:
+            self.assertEqual(row["group"], "mixed")
 
     def test_study_cli_argument_errors(self) -> None:
         for argv in (

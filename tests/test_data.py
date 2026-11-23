@@ -213,6 +213,14 @@ class TestMissingCells(unittest.TestCase):
             present = frame.filter(pl.col(DATASET_COLUMN) == row["dataset"]).height
             self.assertEqual(row["models_absent"], 25 - present)
 
+    def test_the_absences_are_in_the_smallest_datasets(self) -> None:
+        """The chapter's claim that the missingness is not at random, as a test."""
+        frame = load()
+        short = set(missing_cells(frame)["dataset"].to_list())
+        sizes = frame.group_by(DATASET_COLUMN).agg(pl.col("nr_inst").first()).sort("nr_inst")
+        smallest = set(sizes[DATASET_COLUMN].to_list()[: len(short)])
+        self.assertEqual(short, smallest)
+
 
 class TestFlexFLBlocks(unittest.TestCase):
     def test_blocks_partition_the_fit_features(self) -> None:
@@ -266,14 +274,6 @@ class TestFlexFLBlocks(unittest.TestCase):
     def test_unknown_feature_raises(self) -> None:
         with self.assertRaisesRegex(ValueError, "nope"):
             flexfl_block("nope")
-
-    def test_the_absences_are_in_the_smallest_datasets(self) -> None:
-        """The chapter's claim that the missingness is not at random, as a test."""
-        frame = load()
-        short = set(missing_cells(frame)["dataset"].to_list())
-        sizes = frame.group_by(DATASET_COLUMN).agg(pl.col("nr_inst").first()).sort("nr_inst")
-        smallest = set(sizes[DATASET_COLUMN].to_list()[: len(short)])
-        self.assertEqual(short, smallest)
 
 
 if __name__ == "__main__":

@@ -241,6 +241,33 @@ class TestFlexFLBlocks(unittest.TestCase):
         self.assertEqual(shares["n_terms"].to_list(), [0] * 5)
         self.assertEqual(float(shares["share"].sum()), 0.0)
 
+    def test_block_tables_carry_the_equation_weights_and_block_subtotals(self) -> None:
+        equation = flexfl_equation()
+        data = flexfl_columns()
+        effects = block_effects(equation, data)
+        for index, term in enumerate(equation.terms):
+            row = effects.filter(pl.col("term") == term.name).row(0, named=True)
+            self.assertEqual(row["weight"], equation.weights[index])
+            self.assertEqual(row["beta"], equation.standardized_weights[index])
+            self.assertEqual(row["direction"], RAISES if equation.standardized_weights[index] > 0 else LOWERS)
+
+        matrix = contributions(equation, data)
+        total = matrix.sum(axis=1)
+        shares = block_shares(equation, data)
+        by_group = {row["group"]: row for row in shares.iter_rows(named=True)}
+        subtotals = {
+            "dataset": matrix[:, [0]].sum(axis=1),
+            "architecture": matrix[:, [1]].sum(axis=1),
+            "fl_config": matrix[:, [2]].sum(axis=1),
+            "federation": matrix[:, [3]].sum(axis=1),
+            MIXED: matrix[:, [4]].sum(axis=1),
+        }
+        for group, subtotal in subtotals.items():
+            low, high = np.percentile(subtotal, [10.0, 90.0])
+            self.assertAlmostEqual(by_group[group]["effect_sum"], float(high - low))
+            expected = float(np.mean((subtotal - subtotal.mean()) * (total - total.mean())) / np.var(total))
+            self.assertAlmostEqual(by_group[group]["share"], expected)
+
 
 class TestVarianceDecomposition(unittest.TestCase):
     def test_perfectly_separated_groups_explain_everything(self) -> None:
