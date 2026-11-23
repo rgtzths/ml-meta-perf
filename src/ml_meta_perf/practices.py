@@ -129,6 +129,12 @@ def term_frequencies(effects: pl.DataFrame, stability: pl.DataFrame, searches: i
     return terms
 
 
+def decile_difference(values: np.ndarray, total: np.ndarray) -> float:
+    lo = np.quantile(values, DECILE)
+    hi = np.quantile(values, 1 - DECILE)
+    return float(total[values >= hi].mean() - total[values <= lo].mean())
+
+
 def feature_evidence(
     equation: Equation,
     columns: dict[str, np.ndarray],
@@ -155,11 +161,18 @@ def feature_evidence(
     practices = feature_practices(equation, columns, stability)
     if practices.height == 0:
         return pl.DataFrame(schema=schema)
+    matrix = contributions(equation, columns)
+    differences = []
+    for feature in practices["feature"].to_list():
+        indices = [i for i, term in enumerate(equation.terms) if feature in term.features]
+        total = matrix[:, indices].sum(axis=1)
+        differences.append(decile_difference(columns[feature], total))
+    practices = practices.with_columns(pl.Series("effect", differences))
     table = practices.rename(
         {"effect": "decile_difference", "direction": "spearman", "stability": "mean_frequency"}
     ).with_columns(pl.lit(margin).alias("margin"))
     table = table.with_columns(
-        (pl.col("decile_difference").abs() >= margin).alias("pass_margin"),
+        (pl.col("decile_difference").is_finite() & (pl.col("decile_difference").abs() >= margin)).alias("pass_margin"),
         (pl.col("spearman").is_finite() & (pl.col("spearman").abs() >= min_direction)).alias("pass_direction"),
         (
             pl.col("spearman").is_finite()

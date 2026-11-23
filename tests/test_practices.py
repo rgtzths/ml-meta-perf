@@ -1,6 +1,7 @@
 """Extraction of written practices, and the filters that keep unsupported ones out."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 import polars as pl
@@ -141,6 +142,7 @@ class TestFeatureEvidence(unittest.TestCase):
                 "v": np.linspace(-3.0, 3.0, 100),
                 "f": np.concatenate([np.linspace(0.0, 0.9, 90), np.linspace(4.0, 5.0, 10)]),
                 "weak": np.linspace(1.0, 5.0, 100),
+                # The shipped fixture fit does not produce a zero-frequency term naturally, so this case is synthetic.
                 "never": np.linspace(1.0, 5.0, 100),
             }
         )
@@ -188,6 +190,9 @@ class TestFeatureEvidence(unittest.TestCase):
             ),
             (True, True, True, True, True),
         )
+        self.assertAlmostEqual(rows["up"]["decile_difference"], 0.36363636363636365)
+        self.assertAlmostEqual(rows["up"]["spearman"], 1.0)
+        self.assertAlmostEqual(rows["up"]["mean_frequency"], 1.0)
         self.assertFalse(rows["small"]["pass_margin"])
         self.assertFalse(rows["small"]["passes_all"])
         self.assertFalse(rows["v"]["pass_direction"])
@@ -203,6 +208,179 @@ class TestFeatureEvidence(unittest.TestCase):
             table["decile_difference"].abs().to_list(),
             sorted(table["decile_difference"].abs().to_list(), reverse=True),
         )
+
+    def test_decile_difference_is_invariant_to_row_order_with_ties(self) -> None:
+        values = np.repeat(np.arange(8.0), 25)
+        other = np.tile(np.arange(25.0), 8)
+        equation = Equation(
+            intercept=0.0,
+            terms=(Term("product", (Atom("x"), Atom("other"))),),
+            weights=(1.0,),
+            standardized_weights=(1.0,),
+        )
+        stability = pl.DataFrame({"term": ["[x] * [other]"], "folds": [1], "frequency": [1.0]})
+        original = feature_evidence(
+            equation, {"x": values, "other": other}, stability, margin=0.0, min_direction=0.0, min_frequency=0.0
+        )
+        permutation = np.random.default_rng(0).permutation(values.size)
+        shuffled = feature_evidence(
+            equation,
+            {"x": values[permutation], "other": other[permutation]},
+            stability,
+            margin=0.0,
+            min_direction=0.0,
+            min_frequency=0.0,
+        )
+        original_x = original.filter(pl.col("feature") == "x")["decile_difference"][0]
+        shuffled_x = shuffled.filter(pl.col("feature") == "x")["decile_difference"][0]
+        self.assertAlmostEqual(original_x, shuffled_x)
+
+    def test_constant_feature_has_zero_decile_difference(self) -> None:
+        equation = Equation(
+            intercept=0.0,
+            terms=(Term("atom", (Atom("constant"),)),),
+            weights=(1.0,),
+            standardized_weights=(1.0,),
+        )
+        table = feature_evidence(
+            equation,
+            {"constant": np.ones(20)},
+            pl.DataFrame({"term": ["constant"], "folds": [1], "frequency": [1.0]}),
+            margin=0.0,
+            min_direction=0.0,
+            min_frequency=0.0,
+        )
+        self.assertEqual(table["decile_difference"][0], 0.0)
+
+    def test_margin_filter_includes_cutoff_and_rejects_value_below_it(self) -> None:
+        difference = 0.3636363636363637
+        equation = rising_equation()
+        data = columns()
+        stability = stability_table(up=0.5, down=0.5)
+        at_cutoff = feature_evidence(
+            equation, data, stability, margin=difference, min_direction=0.0, min_frequency=0.0
+        ).filter(pl.col("feature") == "up")
+        below_cutoff = feature_evidence(
+            equation,
+            data,
+            stability,
+            margin=float(np.nextafter(difference, np.inf)),
+            min_direction=0.0,
+            min_frequency=0.0,
+        ).filter(pl.col("feature") == "up")
+        self.assertTrue(at_cutoff["pass_margin"][0])
+        self.assertFalse(below_cutoff["pass_margin"][0])
+
+    def test_direction_filter_includes_cutoff_and_rejects_value_below_it(self) -> None:
+        equation = rising_equation()
+        data = columns()
+        stability = stability_table(up=0.5, down=0.5)
+        at_cutoff = feature_evidence(
+            equation, data, stability, margin=0.0, min_direction=1.0, min_frequency=0.0
+        ).filter(pl.col("feature") == "up")
+        below_cutoff = feature_evidence(
+            equation,
+            data,
+            stability,
+            margin=0.0,
+            min_direction=float(np.nextafter(1.0, np.inf)),
+            min_frequency=0.0,
+        ).filter(pl.col("feature") == "up")
+        self.assertTrue(at_cutoff["pass_direction"][0])
+        self.assertFalse(below_cutoff["pass_direction"][0])
+
+    def test_frequency_filter_includes_cutoff_and_rejects_value_below_it(self) -> None:
+        equation = rising_equation()
+        data = columns()
+        stability = stability_table(up=0.5, down=0.5)
+        at_cutoff = feature_evidence(
+            equation, data, stability, margin=0.0, min_direction=0.0, min_frequency=0.5
+        ).filter(pl.col("feature") == "up")
+        below_cutoff = feature_evidence(
+            equation,
+            data,
+            stability,
+            margin=0.0,
+            min_direction=0.0,
+            min_frequency=float(np.nextafter(0.5, np.inf)),
+        ).filter(pl.col("feature") == "up")
+        self.assertTrue(at_cutoff["pass_frequency"][0])
+        self.assertFalse(below_cutoff["pass_frequency"][0])
+
+    def test_weak_spearman_is_the_only_failed_evidence_gate(self) -> None:
+        equation = Equation(
+            intercept=0.0,
+            terms=(Term("atom", (Atom("x", "sq"),)), Term("atom", (Atom("x"),))),
+            weights=(1.0, 0.01),
+            standardized_weights=(1.0, 0.01),
+        )
+        stability = pl.DataFrame(
+            {"term": ["x^2", "x"], "folds": [1, 1], "frequency": [1.0, 1.0]}
+        )
+        table = feature_evidence(
+            equation,
+            {"x": np.linspace(-1.0, 1.0, 100)},
+            stability,
+            margin=0.001,
+            min_direction=0.15,
+            min_frequency=0.5,
+        )
+        row = table.row(0, named=True)
+        self.assertGreater(row["decile_difference"], 0.001)
+        self.assertGreater(row["spearman"], 0.0)
+        self.assertLess(abs(row["spearman"]), 0.15)
+        self.assertEqual(
+            (row["pass_margin"], row["pass_direction"], row["pass_sign"], row["pass_frequency"], row["passes_all"]),
+            (True, False, True, True, False),
+        )
+
+    def test_nonfinite_decile_difference_fails_margin(self) -> None:
+        equation = Equation(
+            intercept=0.0,
+            terms=(Term("atom", (Atom("x"),)),),
+            weights=(float("nan"),),
+            standardized_weights=(1.0,),
+        )
+        table = feature_evidence(
+            equation,
+            {"x": np.linspace(1.0, 5.0, 100)},
+            pl.DataFrame({"term": ["x"], "folds": [1], "frequency": [1.0]}),
+            margin=0.05,
+            min_direction=0.15,
+            min_frequency=0.5,
+        )
+        self.assertFalse(table["pass_direction"][0])
+        self.assertFalse(table["pass_margin"][0])
+        self.assertFalse(table["passes_all"][0])
+
+    def test_nan_spearman_fails_direction(self) -> None:
+        equation = Equation(
+            intercept=0.0,
+            terms=(Term("atom", (Atom("x"),)),),
+            weights=(1.0,),
+            standardized_weights=(1.0,),
+        )
+        practices = pl.DataFrame(
+            {
+                "feature": ["x"],
+                "meaning": ["x"],
+                "n_terms": [1],
+                "direction": [float("nan")],
+                "effect": [0.1],
+                "stability": [1.0],
+            }
+        )
+        with mock.patch("ml_meta_perf.practices.feature_practices", return_value=practices):
+            table = feature_evidence(
+                equation,
+                {"x": np.linspace(1.0, 5.0, 100)},
+                pl.DataFrame({"term": ["x"], "folds": [1], "frequency": [1.0]}),
+                margin=0.05,
+                min_direction=0.15,
+                min_frequency=0.5,
+            )
+        self.assertTrue(np.isnan(table["spearman"][0]))
+        self.assertFalse(table["pass_direction"][0])
 
     def test_empty_equation_has_the_feature_evidence_schema(self) -> None:
         empty = Equation(intercept=0.0, terms=(), weights=(), standardized_weights=())

@@ -255,7 +255,14 @@ class TestFlexFLOutputs(unittest.TestCase):
 
     def test_flexfl_cli_writes_effect_tables_and_forwards_effect_config(self) -> None:
         effects = pl.DataFrame(
-            {"term": ["up"], "weight": [0.1], "beta": [0.2], "effect": [0.08], "direction": [0.9]}
+            {
+                "term": ["up"],
+                "group": ["dataset-only"],
+                "weight": [0.1],
+                "beta": [0.2],
+                "effect": [0.08],
+                "direction": [0.9],
+            }
         )
         terms = effects.with_columns(
             pl.lit(7).alias("folds"), pl.lit(8).alias("searches"), pl.lit(0.875).alias("frequency")
@@ -311,7 +318,7 @@ class TestFlexFLOutputs(unittest.TestCase):
             feature_table = pl.read_csv(folder / "feature_evidence.csv")
         self.assertEqual(
             term_table.columns,
-            ["term", "weight", "beta", "effect", "direction", "folds", "searches", "frequency"],
+            ["term", "group", "weight", "beta", "effect", "direction", "folds", "searches", "frequency"],
         )
         self.assertEqual(
             feature_table.columns,

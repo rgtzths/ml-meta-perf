@@ -342,6 +342,7 @@ def run_flexfl(
     """
     config, selection = _resolve(config, selection)
     effects_config = effects_config or load_config().effects
+    margin = effects_config.margin_for(margin_key(schema))
     frame = load(path, schema)
     schema = drop_constant_features(frame, schema)
     report = run_equation(
@@ -364,7 +365,7 @@ def run_flexfl(
         report.equation,
         columns,
         terms.select("term", "folds", "frequency"),
-        margin=effects_config.margin_for(margin_key(schema)),
+        margin=margin,
         min_direction=effects_config.min_direction,
         min_frequency=effects_config.min_frequency,
     )

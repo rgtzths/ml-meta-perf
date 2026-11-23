@@ -623,6 +623,15 @@ class FlexFLSchemaTests(unittest.TestCase):
         shares = result.shares["share"]
         self.assertTrue(abs(shares.sum() - 1) < 1e-9 or all(value == 0 for value in shares))
 
+    def test_missing_margin_fails_before_equation_fit(self) -> None:
+        schema = flexfl_schema("total_time_s")
+        self.assertNotIn(experiment.margin_key(schema), load_config().effects.decile_margin)
+        with mock.patch.object(
+            experiment, "run_equation", wraps=experiment.run_equation
+        ) as fit, self.assertRaisesRegex(KeyError, "total_time_s"):
+            experiment.run_flexfl(FIXTURE, schema, TINY)
+        fit.assert_not_called()
+
     def test_study_cli_argument_errors(self) -> None:
         for argv in (
             ["--target", "performance", "--data", str(FIXTURE)],
@@ -737,23 +746,72 @@ class FlexFLSchemaTests(unittest.TestCase):
         assert terms is not None
         assert features is not None
         self.assertTrue(terms["frequency"].is_between(0.0, 1.0).all())
+        dataset_count = load(FIXTURE, schema)[schema.dataset_column].n_unique()
+        self.assertEqual(terms["searches"].to_list(), [dataset_count] * terms.height)
+        self.assertEqual(terms["folds"].max(), 0)
         self.assertTrue((terms["folds"] <= terms["searches"]).all())
+        self.assertIn(False, features["pass_frequency"].to_list())
         expected_features = {feature for term in result.equation.equation.terms for feature in term.features}
         self.assertEqual(set(features["feature"].to_list()), expected_features)
         for row in result.effects.iter_rows(named=True):
             expected = "raises" if row["beta"] > 0 else "lowers"
             self.assertEqual(row["direction"], f"{expected} n_epochs")
 
+    def test_run_flexfl_uses_effect_thresholds_from_config(self) -> None:
+        schema = flexfl_schema("n_epochs")
+        defaults = load_config().effects
+        default = experiment.run_flexfl(FIXTURE, schema, TINY, effects_config=defaults).features
+        strict = dataclasses.replace(defaults, min_frequency=1.1)
+        strict_features = experiment.run_flexfl(FIXTURE, schema, TINY, effects_config=strict).features
+        self.assertFalse(strict_features["pass_frequency"].any())
+        self.assertFalse(strict_features["passes_all"].any())
+
+        relaxed = dataclasses.replace(defaults, min_direction=0.0, min_frequency=0.0)
+        relaxed_features = experiment.run_flexfl(FIXTURE, schema, TINY, effects_config=relaxed).features
+        default_rows = {row["feature"]: row for row in default.iter_rows(named=True)}
+        relaxed_rows = {row["feature"]: row for row in relaxed_features.iter_rows(named=True)}
+        direction_failures = [
+            feature
+            for feature, row in default_rows.items()
+            if not row["pass_direction"] and np.isfinite(row["spearman"])
+        ]
+        frequency_failures = [feature for feature, row in default_rows.items() if not row["pass_frequency"]]
+        self.assertTrue(direction_failures)
+        self.assertTrue(frequency_failures)
+        direction_feature = direction_failures[0]
+        frequency_feature = frequency_failures[0]
+        self.assertFalse(default_rows[direction_feature]["pass_direction"])
+        self.assertTrue(relaxed_rows[direction_feature]["pass_direction"])
+        self.assertFalse(default_rows[frequency_feature]["pass_frequency"])
+        self.assertTrue(relaxed_rows[frequency_feature]["pass_frequency"])
+
     def test_n_epochs_cli_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
             code = cli.main([
                 "--target", "n_epochs", "--data", str(FIXTURE), "--output", str(out), "--quiet", *TINY_FLAGS,
+                "--effects.decile_margin.n_epochs", "0.125",
             ])
             self.assertEqual(code, 0)
             folder = out / "flexfl" / "n_epochs"
             self.assertTrue((folder / "equation.txt").read_text().startswith("n_epochs = "))
             self.assertIsNone(Equation.load(folder / "equation.json").bounds)
+            feature_evidence = pl.read_csv(folder / "feature_evidence.csv")
+            term_frequency = pl.read_csv(folder / "term_frequency.csv")
+            self.assertEqual(set(feature_evidence["margin"].to_list()), {0.125})
+            self.assertTrue(
+                {
+                    "pass_margin",
+                    "pass_direction",
+                    "pass_sign",
+                    "pass_frequency",
+                    "passes_all",
+                }.issubset(feature_evidence.columns)
+            )
+            self.assertEqual(
+                term_frequency.columns,
+                ["term", "group", "weight", "beta", "effect", "direction", "folds", "searches", "frequency"],
+            )
             search_out = out / "search"
             stdout = io.StringIO()
             with redirect_stdout(stdout):
