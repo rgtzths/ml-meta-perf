@@ -164,21 +164,23 @@ nothing. Every threshold is in the `flexfl_practices` section of `config/study.j
 
 - P1, asynchronous algorithms shorten wall time but need more epochs or bytes. Async minus sync, paired on
   dataset, distribution and worker combination within the Centralized and the Decentralized family.
-- P2, more workers raise communication volume and time faster than they cut compute time. Elasticity of
-  `comm_bytes_total`, `comm_time_total_s` and `compute_time_max_s` with `num_workers` within each dataset,
+- P2, more workers raise communication volume and time faster than they cut compute time. Elasticity here is the OLS slope of `log1p(y)` on
+  `log(num_workers)`, a log1p-scale slope and not a log-log elasticity, of
+  `comm_bytes_total`, `comm_time_total_s` and `compute_time_max_s` within each dataset,
   algorithm and distribution, pooled and per algorithm.
 - P3, non-IID and Dirichlet splits need more epochs and reach lower performance than IID. Paired on dataset,
   algorithm and worker combination; MCC is higher-better, mape lower-better.
 - P4, parameter count drives communication bytes and time more than dataset size. Spearman correlations over
-  the per-dataset medians; capped by `size_max_outcome`, since each dataset has one network.
+  the per-dataset medians; capped by `size_max_outcome`, since each dataset has one network. The equation comparison contrasts decile extremes of dataset-constant features, so each side is
+  one dataset, and the two features' extremes are different datasets.
 
 A practice is `not tested` when a deciding comparison has fewer matched units than `min_pairs`, the
 corpus lacks a column it needs, or no relevant equation contains its feature (or that target's table is
 missing). It is `met` when its observed criterion holds and every required feature passes all four
-`feature_evidence.csv` filters with the expected sign and sits in at least one term reselected in at least
+`feature_evidence.csv` filters with the expected sign and sits in at least `flexfl_practices.min_stable_terms` term(s) reselected in at least
 `effects.min_frequency` of the exclusions (P4 also needs a larger |decile difference| for `total_parameters`
 than for `n_samples`), and `qualified` otherwise, including a contradicted practice. A not-tested reason also
-names any observed criterion that failed. Spearman comparisons need at least 3 datasets to be computable.
+names any observed criterion that failed. Spearman comparisons need at least `flexfl_practices.min_datasets` datasets to be computable.
 The run stops when a table's `baseline_comparison.csv` names another corpus, and records tables without one.
 
 `practices.csv` has one row per practice with the criterion, the observed and equation evidence as text,

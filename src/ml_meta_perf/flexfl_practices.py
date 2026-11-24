@@ -25,6 +25,9 @@ from jsonargparse import ActionConfigFile, ArgumentParser  # pyright: ignore[rep
 
 from ml_meta_perf.config import (
     DEFAULT_CONFIG_PATH,
+    MET,
+    NOT_TESTED,
+    QUALIFIED,
     Configuration,
     EffectsConfig,
     OpaqueConfig,
@@ -33,13 +36,9 @@ from ml_meta_perf.config import (
     SweepConfig,
 )
 from ml_meta_perf.data import FLEXFL_BLOCKS
-from ml_meta_perf.flexfl_baselines import corpus_digest
+from ml_meta_perf.flexfl_baselines import DISTRIBUTIONS, FL_ALGOS, corpus_digest
 from ml_meta_perf.model import Equation
 from ml_meta_perf.stats import spearman
-
-MET = "met"
-QUALIFIED = "qualified"
-NOT_TESTED = "not tested"
 
 PRESENT = "present"
 ABSENT = "absent from the equation"
@@ -49,8 +48,8 @@ FAMILIES = {
     "Centralized": ("CentralizedSync", "CentralizedAsync"),
     "Decentralized": ("DecentralizedSync", "DecentralizedAsync"),
 }
-ALGORITHMS = ("CentralizedSync", "CentralizedAsync", "DecentralizedSync", "DecentralizedAsync")
-SKEWED = ("non_iid", "dirichlet")
+ALGORITHMS = FL_ALGOS
+SKEWED = tuple(name for name in DISTRIBUTIONS if name != "iid")
 UNITS = {
     "total_time_s-log1p": "log1p(s)",
     "comm_bytes_total-log1p": "log1p(bytes)",
@@ -130,6 +129,15 @@ class Check:
     decides: bool
     tested: bool
     scope: dict[str, str] = field(default_factory=dict)
+    dropped: int = 0
+    part: str = "observed"
+    source: str = "corpus"
+
+
+@dataclass(frozen=True)
+class Stability:
+    min_frequency: float
+    min_terms: int
 
 
 @dataclass(frozen=True)
@@ -142,6 +150,7 @@ class Support:
     row: dict[str, float]
     terms: tuple[tuple[str, str, float, float], ...]
     min_frequency: float
+    min_terms: int
 
     @property
     def present(self) -> bool:
@@ -157,7 +166,7 @@ class Support:
             self.present
             and bool(self.row["passes_all"])
             and float(np.sign(self.row["decile_difference"])) == self.expected
-            and self.stable_terms >= 1
+            and self.stable_terms >= self.min_terms
         )
 
 
@@ -235,11 +244,11 @@ def read_evidence(tables: Path, slug: str) -> Evidence | None:
 
 
 def support(
-    evidence: dict[str, Evidence | None], slug: str, feature: str, expected: int, min_frequency: float, role: str
+    evidence: dict[str, Evidence | None], slug: str, feature: str, expected: int, stability: Stability, role: str
 ) -> Support:
     found = evidence.get(slug)
     if found is None:
-        return Support(slug, feature, expected, role, MISSING, {}, (), min_frequency)
+        return Support(slug, feature, expected, role, MISSING, {}, (), stability.min_frequency, stability.min_terms)
     names = [name for name, features in found.term_features.items() if feature in features]
     spans = tuple(
         (str(row["term"]), str(row["blocks"]), float(row["effect"]), float(row["frequency"]))
@@ -247,7 +256,7 @@ def support(
     )
     rows = found.features.filter(pl.col("feature") == feature)
     if rows.height == 0:
-        return Support(slug, feature, expected, role, ABSENT, {}, spans, min_frequency)
+        return Support(slug, feature, expected, role, ABSENT, {}, spans, stability.min_frequency, stability.min_terms)
     row = rows.row(0, named=True)
     numbers = {
         name: float(row[name])
@@ -264,7 +273,7 @@ def support(
             "passes_all",
         )
     }
-    return Support(slug, feature, expected, role, PRESENT, numbers, spans, min_frequency)
+    return Support(slug, feature, expected, role, PRESENT, numbers, spans, stability.min_frequency, stability.min_terms)
 
 
 def holds(value: float, direction: str, threshold: float) -> bool:
@@ -293,12 +302,27 @@ def check(
     minimum: int,
     *,
     decides: bool = True,
+    dropped: int = 0,
+    part: str = "observed",
+    source: str = "corpus",
     **scope: str,
 ) -> Check:
     tested = n >= (minimum if decides else 1) and bool(np.isfinite(value))
     verdict = holds(value, direction, threshold) if tested else None
     return Check(
-        quantity, unit, value if tested else float("nan"), n, direction, threshold, verdict, decides, tested, scope
+        quantity,
+        unit,
+        value if tested else float("nan"),
+        n,
+        direction,
+        threshold,
+        verdict,
+        decides,
+        tested,
+        scope,
+        dropped,
+        part,
+        source,
     )
 
 
@@ -312,7 +336,7 @@ def median(values: np.ndarray) -> float:
 
 def paired(
     frame: pl.DataFrame, key: list[str], column: str, base: str, other: str, value: pl.Expr
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     sides = []
     for level, name in ((base, "base"), (other, "other")):
         side = frame.filter(pl.col(column) == level).select(*key, value.alias(name))
@@ -320,12 +344,17 @@ def paired(
             raise ValueError(f"{column}={level} has more than one row per {', '.join(key)}")
         sides.append(side)
     joined = sides[0].join(sides[1], on=key, how="inner").drop_nulls()
-    return joined["base"].to_numpy().astype(float), joined["other"].to_numpy().astype(float)
+    first = joined["base"].to_numpy().astype(float)
+    second = joined["other"].to_numpy().astype(float)
+    finite = np.isfinite(first) & np.isfinite(second)
+    return first[finite], second[finite], int((~finite).sum())
 
 
-def difference(frame: pl.DataFrame, key: list[str], column: str, base: str, other: str, value: pl.Expr) -> np.ndarray:
-    first, second = paired(frame, key, column, base, other, value)
-    return second - first
+def difference(
+    frame: pl.DataFrame, key: list[str], column: str, base: str, other: str, value: pl.Expr
+) -> tuple[np.ndarray, int]:
+    first, second, dropped = paired(frame, key, column, base, other, value)
+    return second - first, dropped
 
 
 def share(values: np.ndarray, *, negative: bool) -> float:
@@ -339,7 +368,7 @@ def lacking(frame: pl.DataFrame, needed: tuple[str, ...]) -> list[str]:
 
 
 def async_vs_sync(
-    frame: pl.DataFrame, evidence: dict[str, Evidence | None], config: PracticesConfig, min_frequency: float
+    frame: pl.DataFrame, evidence: dict[str, Evidence | None], config: PracticesConfig, stability: Stability
 ) -> Assessment:
     key = ["dataset", "strategy", "combo"]
     checks: list[Check] = []
@@ -348,10 +377,14 @@ def async_vs_sync(
     observed_all = True
     for family, (sync, asynchronous) in FAMILIES.items():
         subset = frame.filter(pl.col("fl_algo").is_in([sync, asynchronous]))
-        time = difference(subset, key, "fl_algo", sync, asynchronous, pl.col("total_time_s").log1p())
-        epochs = difference(subset, key, "fl_algo", sync, asynchronous, pl.col("n_epochs").cast(pl.Float64))
-        sent = difference(subset, key, "fl_algo", sync, asynchronous, pl.col("comm_bytes_total").log1p())
-        slow, fast = paired(subset, key, "fl_algo", sync, asynchronous, pl.col("total_time_s").cast(pl.Float64))
+        time, time_dropped = difference(subset, key, "fl_algo", sync, asynchronous, pl.col("total_time_s").log1p())
+        epochs, epochs_dropped = difference(
+            subset, key, "fl_algo", sync, asynchronous, pl.col("n_epochs").cast(pl.Float64)
+        )
+        sent, sent_dropped = difference(
+            subset, key, "fl_algo", sync, asynchronous, pl.col("comm_bytes_total").log1p()
+        )
+        slow, fast, _ = paired(subset, key, "fl_algo", sync, asynchronous, pl.col("total_time_s").cast(pl.Float64))
         group = [
             check(
                 "median async-sync difference, total_time_s",
@@ -361,6 +394,7 @@ def async_vs_sync(
                 "<=",
                 config.async_time_diff,
                 config.min_pairs,
+                dropped=time_dropped,
                 family=family,
             ),
             check(
@@ -371,6 +405,7 @@ def async_vs_sync(
                 ">=",
                 config.async_epoch_diff,
                 config.min_pairs,
+                dropped=epochs_dropped,
                 family=family,
             ),
             check(
@@ -381,6 +416,7 @@ def async_vs_sync(
                 ">=",
                 config.async_bytes_diff,
                 config.min_pairs,
+                dropped=sent_dropped,
                 family=family,
             ),
         ]
@@ -418,17 +454,17 @@ def async_vs_sync(
             Part(
                 f"{family} wall time",
                 (
-                    support(evidence, "total_time_s-log1p", on, -1, min_frequency, "alternative"),
-                    support(evidence, "total_time_s-log1p", off, 1, min_frequency, "alternative"),
+                    support(evidence, "total_time_s-log1p", on, -1, stability, "alternative"),
+                    support(evidence, "total_time_s-log1p", off, 1, stability, "alternative"),
                 ),
             ),
             Part(
                 f"{family} epochs or bytes",
                 (
-                    support(evidence, "n_epochs", on, 1, min_frequency, "alternative"),
-                    support(evidence, "n_epochs", off, -1, min_frequency, "alternative"),
-                    support(evidence, "comm_bytes_total-log1p", on, 1, min_frequency, "alternative"),
-                    support(evidence, "comm_bytes_total-log1p", off, -1, min_frequency, "alternative"),
+                    support(evidence, "n_epochs", on, 1, stability, "alternative"),
+                    support(evidence, "n_epochs", off, -1, stability, "alternative"),
+                    support(evidence, "comm_bytes_total-log1p", on, 1, stability, "alternative"),
+                    support(evidence, "comm_bytes_total-log1p", off, -1, stability, "alternative"),
                 ),
             ),
         ]
@@ -461,7 +497,7 @@ def cell_elasticities(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def workers_vs_communication(
-    frame: pl.DataFrame, evidence: dict[str, Evidence | None], config: PracticesConfig, min_frequency: float
+    frame: pl.DataFrame, evidence: dict[str, Evidence | None], config: PracticesConfig, stability: Stability
 ) -> Assessment:
     cells = cell_elasticities(frame)
     checks: list[Check] = []
@@ -537,22 +573,22 @@ def workers_vs_communication(
     parts = [
         Part(
             "num_workers raises comm_bytes_total",
-            (support(evidence, "comm_bytes_total-log1p", "num_workers", 1, min_frequency, "required"),),
+            (support(evidence, "comm_bytes_total-log1p", "num_workers", 1, stability, "required"),),
         ),
         Part(
             "num_workers raises comm_time_total_s",
-            (support(evidence, "comm_time_total_s-log1p", "num_workers", 1, min_frequency, "required"),),
+            (support(evidence, "comm_time_total_s-log1p", "num_workers", 1, stability, "required"),),
         ),
         Part(
             "num_workers lowers compute_time_max_s",
-            (support(evidence, "compute_time_max_s-log1p", "num_workers", -1, min_frequency, "required"),),
+            (support(evidence, "compute_time_max_s-log1p", "num_workers", -1, stability, "required"),),
         ),
     ]
     return Assessment(checks, parts, all(bool(item.holds) for item in pooled), failures)
 
 
 def non_iid_vs_iid(
-    frame: pl.DataFrame, evidence: dict[str, Evidence | None], config: PracticesConfig, min_frequency: float
+    frame: pl.DataFrame, evidence: dict[str, Evidence | None], config: PracticesConfig, stability: Stability
 ) -> Assessment:
     key = ["dataset", "fl_algo", "combo"]
     checks: list[Check] = []
@@ -563,11 +599,13 @@ def non_iid_vs_iid(
         for algorithm in ("all", *ALGORITHMS):
             decides = algorithm == "all"
             subset = frame if decides else frame.filter(pl.col("fl_algo") == algorithm)
-            epochs = difference(subset, key, "strategy", "iid", split, pl.col("n_epochs").cast(pl.Float64))
-            mcc = difference(
+            epochs, epochs_dropped = difference(
+                subset, key, "strategy", "iid", split, pl.col("n_epochs").cast(pl.Float64)
+            )
+            mcc, mcc_dropped = difference(
                 subset.filter(pl.col("main_metric") == "mcc"), key, "strategy", "iid", split, pl.col("performance")
             )
-            mape = difference(
+            mape, mape_dropped = difference(
                 subset.filter(pl.col("main_metric") == "mape"), key, "strategy", "iid", split, pl.col("performance")
             )
             scope = {"split": split, "algorithm": algorithm}
@@ -581,6 +619,7 @@ def non_iid_vs_iid(
                     config.non_iid_epoch_diff,
                     config.min_pairs,
                     decides=decides,
+                    dropped=epochs_dropped,
                     task="all",
                     **scope,
                 ),
@@ -593,6 +632,7 @@ def non_iid_vs_iid(
                     config.non_iid_mcc_diff,
                     config.min_pairs,
                     decides=decides,
+                    dropped=mcc_dropped,
                     task="classification",
                     **scope,
                 ),
@@ -605,6 +645,7 @@ def non_iid_vs_iid(
                     config.non_iid_mape_diff,
                     config.min_pairs,
                     decides=decides,
+                    dropped=mape_dropped,
                     task="regression",
                     **scope,
                 ),
@@ -626,17 +667,30 @@ def non_iid_vs_iid(
                 Part(
                     f"{split} {verb}",
                     (
-                        support(evidence, slug, f"strategy_{split}", sign, min_frequency, "alternative"),
-                        support(evidence, slug, "strategy_iid", -sign, min_frequency, "alternative"),
+                        support(evidence, slug, f"strategy_{split}", sign, stability, "alternative"),
+                        support(evidence, slug, "strategy_iid", -sign, stability, "alternative"),
                     ),
                 )
             )
     return Assessment(checks, parts, observed_all, failures)
 
 
+def rank_correlation(first: np.ndarray, second: np.ndarray) -> float:
+    if np.unique(first).size < 2 or np.unique(second).size < 2:
+        return float("nan")
+    return spearman(first, second)
+
+
 def model_vs_dataset_size(
-    frame: pl.DataFrame, evidence: dict[str, Evidence | None], config: PracticesConfig, min_frequency: float
+    frame: pl.DataFrame, evidence: dict[str, Evidence | None], config: PracticesConfig, stability: Stability
 ) -> Assessment:
+    varying = (
+        frame.group_by("dataset")
+        .agg(pl.col("total_parameters").n_unique().alias("p"), pl.col("n_samples").n_unique().alias("s"))
+        .filter((pl.col("p") > 1) | (pl.col("s") > 1))
+    )
+    if varying.height:
+        raise ValueError(f"total_parameters or n_samples varies within dataset {varying['dataset'].to_list()}")
     per_dataset = frame.group_by("dataset").agg(
         pl.col("comm_bytes_total").log1p().median().alias("comm_bytes_total"),
         pl.col("comm_time_total_s").log1p().median().alias("comm_time_total_s"),
@@ -646,7 +700,7 @@ def model_vs_dataset_size(
     parameters = per_dataset["total_parameters"].to_numpy()
     samples = per_dataset["n_samples"].to_numpy()
     datasets = per_dataset.height
-    together = spearman(parameters, samples) if datasets >= 3 else float("nan")
+    together = rank_correlation(parameters, samples) if datasets >= config.min_datasets else float("nan")
     gate = check(
         "Spearman(total_parameters, n_samples) across datasets",
         "Spearman",
@@ -654,7 +708,7 @@ def model_vs_dataset_size(
         datasets,
         "|x| <",
         config.size_collinear_rho,
-        3,
+        config.min_datasets,
         target="datasets",
     )
     checks = [gate]
@@ -666,21 +720,21 @@ def model_vs_dataset_size(
             check(
                 "Spearman(per-dataset median log1p, total_parameters)",
                 "Spearman",
-                spearman(values, parameters),
+                rank_correlation(values, parameters),
                 datasets,
                 ">=",
                 config.size_rho,
-                3,
+                config.min_datasets,
                 target=name,
             ),
             check(
                 "Spearman(per-dataset median log1p, n_samples)",
                 "Spearman",
-                spearman(values, samples),
+                rank_correlation(values, samples),
                 datasets,
                 "|x| <",
                 config.size_rho,
-                3,
+                config.min_datasets,
                 target=name,
             ),
         ]
@@ -696,27 +750,28 @@ def model_vs_dataset_size(
     larger_all = True
     architecture = [feature for feature in FLEXFL_BLOCKS["architecture"] if feature != "total_parameters"]
     for slug in ("comm_bytes_total-log1p", "comm_time_total_s-log1p"):
-        model = support(evidence, slug, "total_parameters", 1, min_frequency, "required")
-        data = support(evidence, slug, "n_samples", 1, min_frequency, "competitor")
-        carriers = [support(evidence, slug, feature, 1, min_frequency, "carrier") for feature in architecture]
+        model = support(evidence, slug, "total_parameters", 1, stability, "required")
+        data = support(evidence, slug, "n_samples", 1, stability, "competitor")
+        carriers = [support(evidence, slug, feature, 1, stability, "carrier") for feature in architecture]
         parts.append(Part(f"total_parameters raises {slug}", (model,)))
         context += [data, *[item for item in carriers if item.present]]
         if model.present:
             rival = abs(data.row["decile_difference"]) if data.present else 0.0
-            larger = abs(model.row["decile_difference"]) > rival
-            larger_all &= larger
-            checks.append(
-                check(
-                    "|decile difference total_parameters| minus |decile difference n_samples|",
-                    UNITS[slug],
-                    abs(model.row["decile_difference"]) - rival,
-                    1,
-                    ">",
-                    0.0,
-                    1,
-                    target=slug,
-                )
+            comparison = check(
+                "|decile difference total_parameters| minus |decile difference n_samples|",
+                UNITS[slug],
+                abs(model.row["decile_difference"]) - rival,
+                1,
+                ">",
+                0.0,
+                1,
+                part="equation",
+                source=f"{slug}/feature_evidence.csv",
+                target=slug,
             )
+            checks.append(comparison)
+            larger = bool(comparison.holds)
+            larger_all &= larger
             if not larger:
                 failures.append(f"{slug}: n_samples has the larger decile difference")
         named = [item.feature for item in carriers if item.supported]
@@ -744,9 +799,10 @@ class Practice:
     statement: str
     needed: tuple[str, ...]
     thresholds: tuple[str, ...]
-    assess: Callable[[pl.DataFrame, dict[str, Evidence | None], PracticesConfig, float], Assessment]
+    assess: Callable[[pl.DataFrame, dict[str, Evidence | None], PracticesConfig, Stability], Assessment]
     criterion: Callable[[PracticesConfig], str]
     confounds: str
+    cap_field: str | None = None
 
 
 PRACTICES = (
@@ -754,7 +810,7 @@ PRACTICES = (
         "P1",
         "Asynchronous algorithms shorten wall time but need more epochs or bytes than synchronous ones.",
         ("dataset", "strategy", "combo", "fl_algo", "total_time_s", "n_epochs", "comm_bytes_total"),
-        ("min_pairs", "async_time_diff", "async_epoch_diff", "async_bytes_diff"),
+        ("min_pairs", "min_stable_terms", "async_time_diff", "async_epoch_diff", "async_bytes_diff"),
         async_vs_sync,
         lambda c: (
             "Per family (Centralized, Decentralized), async minus sync paired on dataset, distribution and worker "
@@ -782,10 +838,11 @@ PRACTICES = (
             "comm_time_total_s",
             "compute_time_max_s",
         ),
-        ("min_pairs", "workers_elasticity_gap"),
+        ("min_pairs", "min_stable_terms", "workers_elasticity_gap"),
         workers_vs_communication,
         lambda c: (
-            "Elasticity = OLS slope of log1p(y) on log(num_workers) within each (dataset, algorithm, distribution) "
+            "Elasticity here is the OLS slope of log1p(y) on log(num_workers), a log1p-scale slope and not a log-log "
+            "elasticity, within each (dataset, algorithm, distribution) "
             f"cell. Over at least {c.min_pairs} cells, the pooled median elasticity is > 0 for comm_bytes_total and "
             "comm_time_total_s and < 0 for compute_time_max_s, and each communication median exceeds |median "
             f"compute_time_max_s elasticity| by at least {c.workers_elasticity_gap}. Per-algorithm medians are "
@@ -802,7 +859,7 @@ PRACTICES = (
         "P3",
         "Non-IID and Dirichlet splits need more epochs and reach lower performance than IID.",
         ("dataset", "strategy", "combo", "fl_algo", "n_epochs", "performance", "main_metric"),
-        ("min_pairs", "non_iid_epoch_diff", "non_iid_mcc_diff", "non_iid_mape_diff"),
+        ("min_pairs", "min_stable_terms", "non_iid_epoch_diff", "non_iid_mcc_diff", "non_iid_mape_diff"),
         non_iid_vs_iid,
         lambda c: (
             "For non_iid and for dirichlet, minus iid, paired on dataset, algorithm and worker combination, at least "
@@ -822,12 +879,12 @@ PRACTICES = (
         "P4",
         "Model size (parameter count) drives communication bytes and time more than dataset size.",
         ("dataset", "comm_bytes_total", "comm_time_total_s", "total_parameters", "n_samples"),
-        ("size_rho", "size_collinear_rho", "size_max_outcome"),
+        ("size_rho", "size_collinear_rho", "size_max_outcome", "min_datasets", "min_stable_terms"),
         model_vs_dataset_size,
         lambda c: (
-            "Across datasets, per-dataset median log1p of comm_bytes_total and of comm_time_total_s: Spearman with "
-            f"total_parameters >= {c.size_rho} and |Spearman| with n_samples < {c.size_rho}. Not tested when "
-            f"|Spearman(total_parameters, n_samples)| >= {c.size_collinear_rho}. "
+            f"Across at least {c.min_datasets} datasets, per-dataset median log1p of comm_bytes_total and of "
+            f"comm_time_total_s: Spearman with total_parameters >= {c.size_rho} and |Spearman| with n_samples < "
+            f"{c.size_rho}. Not tested when |Spearman(total_parameters, n_samples)| >= {c.size_collinear_rho}. "
             "Equation: total_parameters raises both targets, passes all four filters and has a larger "
             "|decile difference| than n_samples. Outcome capped at "
             f"{c.size_max_outcome}."
@@ -835,8 +892,11 @@ PRACTICES = (
         (
             "Each dataset has one fixed network, so parameter count and dataset size vary only across the datasets, "
             "never within one, and cannot be separated from dataset identity. Bytes are parameters times messages "
-            "by construction (the analytic message model), so 'model size drives bytes' is partly true by definition."
+            "by construction (the analytic message model), so 'model size drives bytes' is partly true by definition. "
+            "The equation comparison contrasts decile extremes of dataset-constant features, so each side is one "
+            "dataset, and the two features' extremes are different datasets."
         ),
+        cap_field="size_max_outcome",
     ),
 )
 
@@ -846,16 +906,18 @@ def judge(
     frame: pl.DataFrame,
     evidence: dict[str, Evidence | None],
     config: PracticesConfig,
-    min_frequency: float,
+    stability: Stability,
 ) -> Outcome:
     thresholds = {name: getattr(config, name) for name in practice.thresholds}
     common = (practice.name, practice.statement, practice.criterion(config), practice.confounds, thresholds)
     missing = lacking(frame, practice.needed)
     if missing:
         return Outcome(*common, (), (), (), None, None, NOT_TESTED, f"corpus lacks {', '.join(missing)}")
-    found = practice.assess(frame, evidence, config, min_frequency)
+    found = practice.assess(frame, evidence, config, stability)
     untested = [
-        f"{item.quantity}, {scope_text(item)} (n={item.n})" for item in found.checks if item.decides and not item.tested
+        f"{item.quantity}, {scope_text(item)} (n={item.n}{dropped_text(item)})"
+        for item in found.checks
+        if item.decides and not item.tested
     ]
     unavailable = [part.describe() for part in found.parts if not part.available]
     observed = None if untested or found.gate else found.observed
@@ -875,8 +937,8 @@ def judge(
         ]
         if observed and equation:
             label, reason = MET, "observed criterion and equation evidence both hold"
-            if practice.name == "P4" and config.size_max_outcome == QUALIFIED:
-                label, reason = QUALIFIED, reason + "; capped by size_max_outcome"
+            if practice.cap_field and getattr(config, practice.cap_field) == QUALIFIED:
+                label, reason = QUALIFIED, reason + f"; capped by {practice.cap_field}"
         else:
             label, reason = QUALIFIED, "; ".join(failures) if failures else "criterion not fully met"
     return Outcome(
@@ -892,6 +954,10 @@ def load_corpus(path: str | Path) -> pl.DataFrame:
     return frame
 
 
+def dropped_text(item: Check) -> str:
+    return f", {item.dropped} non-finite dropped" if item.dropped else ""
+
+
 def scope_text(item: Check) -> str:
     return ", ".join(f"{key} {value}" for key, value in item.scope.items())
 
@@ -900,7 +966,7 @@ def describe_observed(outcome: Outcome) -> str:
     return "; ".join(
         f"{scope_text(item)}: {item.quantity} {item.value:.4f} {item.unit} (n={item.n})"
         for item in outcome.checks
-        if item.decides or item.unit == "ratio"
+        if item.part == "observed" and (item.decides or item.unit == "ratio")
     )
 
 
@@ -931,7 +997,13 @@ def unique_supports(outcome: Outcome) -> list[tuple[str, Support]]:
 
 
 def describe_equation(outcome: Outcome) -> str:
-    return "; ".join(describe_support(item) for _, item in unique_supports(outcome))
+    support_text = "; ".join(describe_support(item) for _, item in unique_supports(outcome))
+    comparison_text = "; ".join(
+        f"{item.quantity} {item.value:.4f} {item.unit} (n={item.n}, {scope_text(item)})"
+        for item in outcome.checks
+        if item.part == "equation"
+    )
+    return "; ".join(text for text in (support_text, comparison_text) if text)
 
 
 def detail_rows(outcome: Outcome) -> list[dict[str, object]]:
@@ -943,7 +1015,7 @@ def detail_rows(outcome: Outcome) -> list[dict[str, object]]:
             | item.scope
             | {
                 "practice": outcome.practice,
-                "part": "observed" if not item.quantity.startswith("|decile") else "equation",
+                "part": item.part,
                 "role": "criterion" if item.decides else "descriptive",
                 "quantity": item.quantity,
                 "unit": item.unit,
@@ -953,10 +1025,10 @@ def detail_rows(outcome: Outcome) -> list[dict[str, object]]:
                 "threshold": None if item.direction == "" else item.threshold,
                 "holds": item.holds,
                 "decides": item.decides,
-                "source": "corpus"
-                if not item.quantity.startswith("|decile")
-                else f"{item.scope.get('target')}/feature_evidence.csv",
-                "note": None if item.tested else "not computable",
+                "source": item.source,
+                "note": None if item.tested and not item.dropped else (
+                    "not computable" if not item.tested else f"{item.dropped} non-finite pairs dropped"
+                ) + (f"; {item.dropped} non-finite pairs dropped" if not item.tested and item.dropped else ""),
             }
         )
     for name, item in unique_supports(outcome):
@@ -1020,8 +1092,8 @@ def detail_rows(outcome: Outcome) -> list[dict[str, object]]:
                     "unit": "count",
                     "value": float(item.stable_terms),
                     "direction": ">=",
-                    "threshold": 1.0,
-                    "holds": item.stable_terms >= 1,
+                    "threshold": float(item.min_terms),
+                    "holds": item.stable_terms >= item.min_terms,
                     "source": f"{item.slug}/term_frequency.csv",
                 }
             )
@@ -1054,6 +1126,19 @@ def corpus_check(evidence: dict[str, Evidence | None], corpus_sha256: str) -> st
     return text + (f"; no baseline_comparison.csv in {', '.join(unchecked)}" if unchecked else "")
 
 
+def flag_check(evidence: dict[str, Evidence | None], min_frequency: float) -> str:
+    margins = []
+    for slug, found in evidence.items():
+        if found is None or found.features.height == 0:
+            continue
+        expected = found.features["mean_frequency"] >= min_frequency
+        stale = found.features.filter(found.features["pass_frequency"] != expected)["feature"].to_list()
+        if stale:
+            raise ValueError(f"{slug}: pass_frequency disagrees with min_frequency {min_frequency} for {stale}")
+        margins.append(f"{slug}={','.join(str(v) for v in sorted(found.features['margin'].unique().to_list()))}")
+    return "fit margins " + "; ".join(margins) if margins else ""
+
+
 def diagnose(
     frame: pl.DataFrame,
     tables: Path,
@@ -1065,7 +1150,10 @@ def diagnose(
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     evidence = {slug: read_evidence(tables, slug) for slug in SLUGS}
     guarded = corpus_check(evidence, corpus_sha256)
-    outcomes = [judge(practice, frame, evidence, config, min_frequency) for practice in PRACTICES]
+    flags = flag_check(evidence, min_frequency)
+    guarded = f"{guarded}; {flags}" if flags else guarded
+    stability = Stability(min_frequency, config.min_stable_terms)
+    outcomes = [judge(practice, frame, evidence, config, stability) for practice in PRACTICES]
     summary = pl.DataFrame(
         [
             {

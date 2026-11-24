@@ -22,6 +22,7 @@ Study chapter: [3. Term generation and selection][study-chapter] -- the rational
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -132,9 +133,16 @@ class EffectsConfig:
             raise KeyError(f"{slug!r} is not configured; configured slugs: {configured}") from None
 
 
+MET = "met"
+QUALIFIED = "qualified"
+NOT_TESTED = "not tested"
+
+
 @dataclass(frozen=True)
 class PracticesConfig:
     min_pairs: int
+    min_datasets: int
+    min_stable_terms: int
     async_time_diff: float
     async_epoch_diff: float
     async_bytes_diff: float
@@ -153,7 +161,25 @@ class PracticesConfig:
             value = getattr(self, name)
             if not 0.0 < value <= 1.0:
                 raise ValueError(f"{name} must lie in (0, 1], got {value}")
-        if self.size_max_outcome not in ("met", "qualified"):
+        if self.min_datasets < 3:
+            raise ValueError(f"min_datasets must be at least 3, got {self.min_datasets}")
+        if self.min_stable_terms < 1:
+            raise ValueError(f"min_stable_terms must be at least 1, got {self.min_stable_terms}")
+        for name in ("async_time_diff", "non_iid_mcc_diff"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value <= 0.0):
+                raise ValueError(f"{name} must be finite and at most 0, got {value}")
+        for name in (
+            "async_epoch_diff",
+            "async_bytes_diff",
+            "workers_elasticity_gap",
+            "non_iid_epoch_diff",
+            "non_iid_mape_diff",
+        ):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value >= 0.0):
+                raise ValueError(f"{name} must be finite and at least 0, got {value}")
+        if self.size_max_outcome not in (MET, QUALIFIED):
             raise ValueError(f"size_max_outcome must be 'met' or 'qualified', got {self.size_max_outcome!r}")
 
 

@@ -275,6 +275,8 @@ effective configuration. E1, E2 and E3 share every one of these values.
 | `effects.min_direction` | 0.15 | minimum absolute Spearman correlation for directional evidence |
 | `effects.min_frequency` | 0.5 | minimum mean term reselection frequency |
 | `flexfl_practices.min_pairs` | 30 | fewest matched pairs or cells for a deciding practice comparison |
+| `flexfl_practices.min_datasets` | 3 | fewest datasets for P4's Spearman comparisons |
+| `flexfl_practices.min_stable_terms` | 1 | fewest stable terms behind a supported feature |
 | `flexfl_practices.async_time_diff` | -0.10 | P1: largest median async-sync log1p wall-time difference that counts as shorter |
 | `flexfl_practices.async_epoch_diff` | 2.0 | P1: smallest median async-sync epoch difference that counts as more epochs |
 | `flexfl_practices.async_bytes_diff` | 0.10 | P1: smallest median async-sync log1p byte difference that counts as more bytes |
