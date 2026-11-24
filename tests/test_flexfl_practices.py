@@ -38,6 +38,7 @@ STRATEGIES = ("iid", "non_iid", "dirichlet")
 PARAMETERS = (100, 200, 300, 400, 500, 600, 700, 800)
 SAMPLES = (500, 100, 800, 300, 700, 200, 600, 400)
 MIN_FREQUENCY = 0.5
+SHARE_WEIGHTS = {"n_samples": 0.1}
 
 SUPPORTING: dict[str, list[tuple[str, float, bool]]] = {
     "total_time_s-log1p": [("fl_algo_CentralizedAsync", -1.0, True), ("fl_algo_DecentralizedAsync", -1.0, True)],
@@ -117,6 +118,7 @@ def write_tables(
     *,
     digest: str | None = None,
     frequency: float = 1.0,
+    weights: dict[str, float] | None = None,
 ) -> Path:
     for slug, features in evidence.items():
         target = folder / slug
@@ -143,7 +145,7 @@ def write_tables(
                 "term": names,
                 "group": ["mixed"] * len(names),
                 "blocks": ["fl_config"] * len(names),
-                "weight": [1.0] * len(names),
+                "weight": [(weights or {}).get(name, 1.0) for name in names],
                 "beta": [1.0] * len(names),
                 "effect": [abs(difference) for _, difference, _ in features],
                 "direction": ["raises"] * len(names),
@@ -155,7 +157,7 @@ def write_tables(
         Equation(
             intercept=0.0,
             terms=tuple(Term("atom", (Atom(name),)) for name in names),
-            weights=tuple(1.0 for _ in names),
+            weights=tuple((weights or {}).get(name, 1.0) for name in names),
             standardized_weights=tuple(1.0 for _ in names),
         ).save(target / "equation.json")
         if digest is not None:
@@ -198,6 +200,7 @@ class PracticeTestCase(unittest.TestCase):
 
     def tables(self, evidence: dict[str, list[tuple[str, float, bool]]] | None = None, **options: object) -> Path:
         folder = self.root / f"tables{len(list(self.root.iterdir()))}"
+        options.setdefault("weights", SHARE_WEIGHTS)
         return write_tables(folder, SUPPORTING if evidence is None else evidence, **options)  # pyright: ignore[reportArgumentType]
 
 
@@ -339,18 +342,217 @@ class TestNonIidVersusIid(PracticeTestCase):
 
 
 class TestModelVersusDatasetSize(PracticeTestCase):
+    def test_parameter_shares_met_with_detail_for_both_targets(self) -> None:
+        summary, detail = run(corpus(), self.tables(), practices_config(size_max_outcome=MET))
+        self.assertEqual(summary.filter(pl.col("practice") == "P4")["outcome"].to_list(), [MET])
+        quantity = "share(total_parameters) minus share(n_samples) of output variance"
+        rows = detail.filter((pl.col("practice") == "P4") & (pl.col("quantity") == quantity))
+        self.assertEqual(set(rows["target"].to_list()), {"comm_bytes_total-log1p", "comm_time_total_s-log1p"})
+        self.assertEqual(set(rows["part"].to_list()), {"equation"})
+        self.assertEqual(
+            set(rows["source"].to_list()),
+            {
+                "comm_bytes_total-log1p/equation.json and corpus",
+                "comm_time_total_s-log1p/equation.json and corpus",
+            },
+        )
+        self.assertTrue((rows["value"] >= 0.10).all())
+        self.assertTrue(rows["holds"].all())
+        self.assertEqual(set(rows["threshold"].to_list()), {0.10})
+
+    def test_dataset_size_carries_more_share_and_names_the_target(self) -> None:
+        summary, detail = run(
+            corpus(), self.tables(weights={"n_samples": 3.0}), practices_config(size_max_outcome=MET)
+        )
+        row = summary.filter(pl.col("practice") == "P4").row(0, named=True)
+        self.assertEqual(row["outcome"], QUALIFIED)
+        self.assertIn("comm_bytes_total-log1p: share(total_parameters) minus share(n_samples) is", row["reason"])
+        comparison = detail.filter(
+            (pl.col("practice") == "P4")
+            & (pl.col("target") == "comm_bytes_total-log1p")
+            & (pl.col("quantity") == "share(total_parameters) minus share(n_samples) of output variance")
+        ).row(0, named=True)
+        self.assertFalse(comparison["holds"])
+
+    def test_equal_shares_do_not_pass_a_positive_gap(self) -> None:
+        config = practices_config(size_max_outcome=MET, size_share_gap=0.01)
+        tables = self.tables(weights={"total_parameters": 1.0, "n_samples": 1.0})
+        summary, detail = run(corpus(), tables, config)
+        self.assertEqual(
+            detail.filter(
+                (pl.col("practice") == "P4")
+                & (pl.col("target") == "comm_bytes_total-log1p")
+                & (pl.col("quantity") == "share(total_parameters) minus share(n_samples) of output variance")
+            ).height,
+            1,
+        )
+        comparison = detail.filter(
+            (pl.col("practice") == "P4")
+            & (pl.col("target") == "comm_bytes_total-log1p")
+            & (pl.col("quantity") == "share(total_parameters) minus share(n_samples) of output variance")
+        ).row(0, named=True)
+        self.assertAlmostEqual(comparison["value"], 0.0, delta=1e-9)
+        self.assertFalse(comparison["holds"])
+        self.assertEqual(summary.filter(pl.col("practice") == "P4")["outcome"].to_list(), [QUALIFIED])
+
+    def test_a_negative_dataset_size_share_adds_to_the_gap(self) -> None:
+        evidence = dict(SUPPORTING)
+        evidence["comm_time_total_s-log1p"] = [
+            ("num_workers", 1.0, True),
+            ("total_parameters", 2.0, True),
+            ("n_samples", 0.1, False),
+        ]
+        frame = corpus(samples=(700, 300, 800, 500, 600, 100, 400, 200))
+        summary, detail = run(
+            frame,
+            self.tables(evidence, weights={"n_samples": 0.3}),
+            practices_config(size_max_outcome=MET, size_share_gap=1.0),
+        )
+        shares = detail.filter(
+            (pl.col("practice") == "P4")
+            & (pl.col("quantity") == "share of output variance in terms containing the feature")
+            & (pl.col("feature") == "n_samples")
+        )
+        self.assertEqual(shares.height, 2)
+        self.assertTrue((shares["value"] < 0.0).all())
+        self.assertEqual(summary.filter(pl.col("practice") == "P4")["outcome"].to_list(), [MET])
+
+    def test_configured_share_gap_decides_the_label(self) -> None:
+        weight = 0.92
+        columns = corpus()
+        parameter = columns["total_parameters"].to_numpy().astype(float)
+        samples = columns["n_samples"].to_numpy().astype(float) * weight
+        total = parameter + samples
+        expected = float(
+            np.mean((parameter - parameter.mean()) * (total - total.mean())) / np.var(total)
+            - np.mean((samples - samples.mean()) * (total - total.mean())) / np.var(total)
+        )
+        self.assertGreater(expected, 0.05)
+        self.assertLess(expected, 0.10)
+        self.assertEqual(
+            outcomes(
+                corpus(), self.tables(weights={"n_samples": weight}), practices_config(size_max_outcome=MET)
+            )["P4"],
+            QUALIFIED,
+        )
+        self.assertEqual(
+            outcomes(
+                corpus(),
+                self.tables(weights={"n_samples": weight}),
+                practices_config(size_max_outcome=MET, size_share_gap=0.05),
+            )["P4"],
+            MET,
+        )
+
+    def test_share_gap_equal_to_threshold_holds_but_next_float_does_not(self) -> None:
+        quantity = "share(total_parameters) minus share(n_samples) of output variance"
+        _, detail = run(corpus(), self.tables(), practices_config(size_max_outcome=MET))
+        rows = detail.filter((pl.col("practice") == "P4") & (pl.col("quantity") == quantity))
+        self.assertEqual(rows.height, 2)
+        gap = float(np.min(rows["value"].to_numpy()))
+        self.assertGreater(gap, 0.0)
+        above = float(np.nextafter(gap, np.inf))
+        self.assertLessEqual(above, 1.0)
+        self.assertEqual(
+            outcomes(corpus(), self.tables(), practices_config(size_max_outcome=MET, size_share_gap=gap))["P4"],
+            MET,
+        )
+        summary, above_detail = run(
+            corpus(), self.tables(), practices_config(size_max_outcome=MET, size_share_gap=above)
+        )
+        self.assertEqual(summary.filter(pl.col("practice") == "P4")["outcome"].to_list(), [QUALIFIED])
+        above_rows = above_detail.filter((pl.col("practice") == "P4") & (pl.col("quantity") == quantity))
+        smaller_target = rows.filter(pl.col("value") == gap)["target"][0]
+        self.assertFalse(above_rows.filter(pl.col("target") == smaller_target)["holds"][0])
+
+    def test_missing_equation_column_makes_share_not_computable(self) -> None:
+        evidence = dict(SUPPORTING)
+        evidence["comm_bytes_total-log1p"] = [*SUPPORTING["comm_bytes_total-log1p"], ("missing_column", 1.0, True)]
+        summary, detail = run(corpus(), self.tables(evidence), practices_config(size_max_outcome=MET))
+        row = summary.filter(pl.col("practice") == "P4").row(0, named=True)
+        self.assertEqual(row["outcome"], NOT_TESTED)
+        self.assertIn("not computable", row["reason"])
+        comparison = detail.filter(
+            (pl.col("practice") == "P4")
+            & (pl.col("target") == "comm_bytes_total-log1p")
+            & (pl.col("quantity") == "share(total_parameters) minus share(n_samples) of output variance")
+        ).row(0, named=True)
+        self.assertGreater(comparison["n"], 0)
+        self.assertIsNone(comparison["holds"])
+
+    def test_absent_n_samples_term_has_zero_share(self) -> None:
+        _, detail = run(corpus(), self.tables(), practices_config(size_max_outcome=MET))
+        quantity = "share(total_parameters) minus share(n_samples) of output variance"
+        self.assertEqual(
+            detail.filter(
+                (pl.col("practice") == "P4")
+                & (pl.col("target") == "comm_time_total_s-log1p")
+                & (pl.col("quantity") == quantity)
+            ).height,
+            1,
+        )
+        comparison = detail.filter(
+            (pl.col("practice") == "P4")
+            & (pl.col("target") == "comm_time_total_s-log1p")
+            & (pl.col("quantity") == quantity)
+        ).row(0, named=True)
+        self.assertTrue(comparison["holds"])
+        self.assertEqual(
+            detail.filter(
+                (pl.col("practice") == "P4")
+                & (pl.col("target") == "comm_time_total_s-log1p")
+                & (pl.col("quantity") == "share of output variance in terms containing the feature")
+                & (pl.col("feature") == "n_samples")
+            ).height,
+            1,
+        )
+        share = detail.filter(
+            (pl.col("practice") == "P4")
+            & (pl.col("target") == "comm_time_total_s-log1p")
+            & (pl.col("quantity") == "share of output variance in terms containing the feature")
+            & (pl.col("feature") == "n_samples")
+        ).row(0, named=True)
+        self.assertEqual(share["value"], 0.0)
+
+    def test_decile_extremes_do_not_decide_the_equation_comparison(self) -> None:
+        evidence = dict(SUPPORTING)
+        for slug in ("comm_bytes_total-log1p", "comm_time_total_s-log1p"):
+            evidence[slug] = [
+                (
+                    feature,
+                    2.0 if feature == "total_parameters" else 9.0 if feature == "n_samples" else difference,
+                    passes,
+                )
+                for feature, difference, passes in SUPPORTING[slug]
+            ]
+        self.assertEqual(
+            outcomes(corpus(), self.tables(evidence), practices_config(size_max_outcome=MET))["P4"],
+            MET,
+        )
+        for slug in ("comm_bytes_total-log1p", "comm_time_total_s-log1p"):
+            evidence[slug] = [
+                (
+                    feature,
+                    9.0 if feature == "total_parameters" else 2.0 if feature == "n_samples" else difference,
+                    passes,
+                )
+                for feature, difference, passes in SUPPORTING[slug]
+            ]
+        self.assertEqual(
+            outcomes(
+                corpus(), self.tables(evidence, weights={"n_samples": 3.0}), practices_config(size_max_outcome=MET)
+            )["P4"],
+            QUALIFIED,
+        )
+
     def test_collinear_sizes_are_not_tested(self) -> None:
         frame = corpus(samples=PARAMETERS)
         self.assertEqual(outcomes(frame, self.tables(), practices_config(size_max_outcome=MET))["P4"], NOT_TESTED)
 
     def test_dataset_size_larger_in_the_equation_is_qualified(self) -> None:
-        evidence = dict(SUPPORTING)
-        evidence["comm_bytes_total-log1p"] = [
-            ("num_workers", 1.0, True),
-            ("total_parameters", 2.0, True),
-            ("n_samples", 3.0, True),
-        ]
-        labels = outcomes(corpus(), self.tables(evidence), practices_config(size_max_outcome=MET))
+        labels = outcomes(
+            corpus(), self.tables(weights={"n_samples": 3.0}), practices_config(size_max_outcome=MET)
+        )
         self.assertEqual(labels["P4"], QUALIFIED)
 
     def test_parameters_absent_from_an_equation_are_not_tested(self) -> None:
@@ -368,7 +570,8 @@ class TestModelVersusDatasetSize(PracticeTestCase):
             ("max_layer_width", 3.0, True),
             ("n_layers", -3.0, True),
         ]
-        row = summary_row(corpus(), self.tables(evidence), practices_config(size_max_outcome=MET), "P4")
+        frame = corpus().with_columns(pl.lit(1.0).alias("max_layer_width"), pl.lit(1.0).alias("n_layers"))
+        row = summary_row(frame, self.tables(evidence), practices_config(size_max_outcome=MET), "P4")
         self.assertEqual(row["outcome"], QUALIFIED)
         self.assertIn("architecture effect carried by max_layer_width", row["reason"])
         self.assertNotIn("n_layers", row["reason"])
@@ -403,13 +606,14 @@ class TestOutputs(PracticeTestCase):
                 self.assertTrue(row["equation_evidence"])
         self.assertIn("median async-sync difference, total_time_s", rows["P1"]["observed"])
         self.assertIn("fl_algo_CentralizedAsync", rows["P1"]["equation_evidence"])
-        self.assertIn("each side is one dataset", rows["P4"]["confounds"])
+        self.assertNotIn("each side is one dataset", rows["P4"]["confounds"])
+        self.assertIn("features that share a term overlap", rows["P4"]["confounds"])
         self.assertIn("log1p-scale slope", rows["P2"]["criterion"])
         keys = {
             "P1": {"min_pairs", "async_time_diff", "async_epoch_diff", "async_bytes_diff"},
             "P2": {"min_pairs", "workers_elasticity_gap"},
             "P3": {"min_pairs", "non_iid_epoch_diff", "non_iid_mcc_diff", "non_iid_mape_diff"},
-            "P4": {"size_rho", "size_collinear_rho", "size_max_outcome", "min_datasets"},
+            "P4": {"size_rho", "size_collinear_rho", "size_share_gap", "size_max_outcome", "min_datasets"},
         }
         for practice, names in keys.items():
             with self.subTest(practice=practice):
@@ -419,6 +623,8 @@ class TestOutputs(PracticeTestCase):
         self.assertIn("corpus", sources)
         self.assertIn("total_time_s-log1p/feature_evidence.csv", sources)
         self.assertIn("n_epochs/term_frequency.csv", sources)
+        self.assertIn("comm_bytes_total-log1p/equation.json and corpus", sources)
+        self.assertIn("comm_time_total_s-log1p/equation.json and corpus", sources)
 
     def test_tables_without_a_corpus_digest_are_recorded_as_unchecked(self) -> None:
         row = summary_row(corpus(), self.tables(), practices_config(), "P1")
@@ -485,6 +691,7 @@ class TestOutputs(PracticeTestCase):
             ),
             term_features={name: ("total_parameters", "num_workers")},
             corpus_sha256=None,
+            equation=Equation(0.0, (), (), ()),
         )
         found = support(
             {"comm_time_total_s-log1p": evidence},
@@ -592,13 +799,14 @@ class TestGuards(PracticeTestCase):
     def test_the_equation_comparison_is_reported_under_equation_evidence(self) -> None:
         summary, detail = run(corpus(), self.tables(), practices_config(size_max_outcome=MET), commit="t")
         row = summary.filter(pl.col("practice") == "P4").row(0, named=True)
-        self.assertNotIn("|decile difference", row["observed"])
-        self.assertIn("|decile difference", row["equation_evidence"])
-        rows = detail.filter(pl.col("quantity").str.starts_with("|decile difference"))
+        quantity = "share(total_parameters) minus share(n_samples) of output variance"
+        self.assertNotIn(quantity, row["observed"])
+        self.assertIn(quantity, row["equation_evidence"])
+        rows = detail.filter(pl.col("quantity") == quantity)
         self.assertEqual(set(rows["part"].to_list()), {"equation"})
         self.assertEqual(
             set(rows["source"].to_list()),
-            {"comm_bytes_total-log1p/feature_evidence.csv", "comm_time_total_s-log1p/feature_evidence.csv"},
+            {"comm_bytes_total-log1p/equation.json and corpus", "comm_time_total_s-log1p/equation.json and corpus"},
         )
 
     def test_the_fit_margins_name_each_table(self) -> None:
@@ -883,6 +1091,7 @@ class TestCoverage(PracticeTestCase):
                 ),
                 term_features={term: ("num_workers",) for term in names},
                 corpus_sha256=None,
+                equation=Equation(0.0, (), (), ()),
             )
             return {"n_epochs": found}
 
@@ -915,11 +1124,16 @@ class TestPracticesConfig(unittest.TestCase):
         self.assertEqual(config.non_iid_mcc_diff, -0.02)
         self.assertEqual(config.non_iid_mape_diff, 0.02)
         self.assertEqual(config.size_collinear_rho, 0.74)
+        self.assertEqual(config.size_share_gap, 0.10)
 
     def test_invalid_values_are_rejected(self) -> None:
+        self.assertIn("size_share_gap", PracticesConfig.__dataclass_fields__)
         for change in (
             {"min_pairs": 1},
             {"size_rho": 0.0},
+            {"size_share_gap": 0.0},
+            {"size_share_gap": 1.5},
+            {"size_share_gap": float("nan")},
             {"size_max_outcome": "not tested"},
             {"async_time_diff": 0.1},
             {"non_iid_mcc_diff": 0.02},

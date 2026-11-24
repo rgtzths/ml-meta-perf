@@ -152,6 +152,7 @@ class PracticesConfig:
     non_iid_mape_diff: float
     size_rho: float
     size_collinear_rho: float
+    size_share_gap: float
     size_max_outcome: str
 
     def __post_init__(self) -> None:
@@ -161,6 +162,8 @@ class PracticesConfig:
             value = getattr(self, name)
             if not 0.0 < value <= 1.0:
                 raise ValueError(f"{name} must lie in (0, 1], got {value}")
+        if not (math.isfinite(self.size_share_gap) and 0.0 < self.size_share_gap <= 1.0):
+            raise ValueError(f"size_share_gap must be finite and lie in (0, 1], got {self.size_share_gap}")
         if self.min_datasets < 3:
             raise ValueError(f"min_datasets must be at least 3, got {self.min_datasets}")
         if self.min_stable_terms < 1:

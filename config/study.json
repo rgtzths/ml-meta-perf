@@ -55,6 +55,7 @@
     "non_iid_mape_diff": 0.02,
     "size_rho": 0.74,
     "size_collinear_rho": 0.74,
+    "size_share_gap": 0.10,
     "size_max_outcome": "qualified"
   }
 }
