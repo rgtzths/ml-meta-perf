@@ -240,6 +240,9 @@ adopting it is a reviewed edit to `config/study.json`.
 FlexFL targets are available in both commands; see [the FlexFL guide](FLEXFL.md). The study CLI writes `equation.json`, `equation.txt`, `curve.csv`,
 `term_effects.csv` and `group_shares.csv` under `<output>/flexfl/<slug>/`, and with
 `--baselines` or `--extrapolation` also `baseline_comparison.csv` and `baseline_notes.txt`.
+In `term_effects.csv`, `group` is one of `dataset`, `architecture`, `fl_config`, `federation` or `mixed`,
+`blocks` lists the blocks a term spans, and `effect` is the 10th-to-90th percentile range of its weighted contribution.
+`group_shares.csv` has five rows, whose covariance shares sum to 1 when the equation output varies.
 `--log-target` writes to `<output>/flexfl/<slug>-log1p/`.
 
 **One note on threading.** The inner loop is ~87k solves of matrices no larger than 32×32,
