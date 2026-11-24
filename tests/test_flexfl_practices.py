@@ -190,6 +190,43 @@ def set_feature(tables: Path, slug: str, feature: str, **values: object) -> None
     ).write_csv(path)
 
 
+SHARE = "share(total_parameters) minus share(n_samples) of output variance"
+FEATURE_SHARE = "share of output variance in terms containing the feature"
+
+
+def detail_row(detail: pl.DataFrame, target: str, quantity: str, feature: str | None = None) -> dict[str, Any]:
+    rows = detail.filter((pl.col("practice") == "P4") & (pl.col("target") == target) & (pl.col("quantity") == quantity))
+    if feature is not None:
+        rows = rows.filter(pl.col("feature") == feature)
+    if rows.height != 1:
+        raise AssertionError(f"expected one {quantity} row for {target} {feature}, found {rows.height}")
+    return rows.row(0, named=True)
+
+
+def set_equation(tables: Path, slug: str, terms: list[tuple[Term, float]]) -> None:
+    Equation(
+        intercept=0.0,
+        terms=tuple(term for term, _ in terms),
+        weights=tuple(weight for _, weight in terms),
+        standardized_weights=tuple(1.0 for _ in terms),
+    ).save(tables / slug / "equation.json")
+
+
+def oracle_shares(contributions: list[tuple[set[str], np.ndarray]], features: tuple[str, ...]) -> dict[str, float]:
+    total = np.sum([values for _, values in contributions], axis=0)
+    variance = np.var(total)
+    covariances = [(names, np.cov(values, total, bias=True)[0, 1]) for names, values in contributions]
+    return {feature: sum(c for names, c in covariances if feature in names) / variance for feature in features}
+
+
+def atom(feature: str) -> Term:
+    return Term("atom", (Atom(feature),))
+
+
+def product(first: str, second: str) -> Term:
+    return Term("product", (Atom(first), Atom(second)))
+
+
 class PracticeTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -367,30 +404,13 @@ class TestModelVersusDatasetSize(PracticeTestCase):
         row = summary.filter(pl.col("practice") == "P4").row(0, named=True)
         self.assertEqual(row["outcome"], QUALIFIED)
         self.assertIn("comm_bytes_total-log1p: share(total_parameters) minus share(n_samples) is", row["reason"])
-        comparison = detail.filter(
-            (pl.col("practice") == "P4")
-            & (pl.col("target") == "comm_bytes_total-log1p")
-            & (pl.col("quantity") == "share(total_parameters) minus share(n_samples) of output variance")
-        ).row(0, named=True)
-        self.assertFalse(comparison["holds"])
+        self.assertFalse(detail_row(detail, "comm_bytes_total-log1p", SHARE)["holds"])
 
     def test_equal_shares_do_not_pass_a_positive_gap(self) -> None:
         config = practices_config(size_max_outcome=MET, size_share_gap=0.01)
         tables = self.tables(weights={"total_parameters": 1.0, "n_samples": 1.0})
         summary, detail = run(corpus(), tables, config)
-        self.assertEqual(
-            detail.filter(
-                (pl.col("practice") == "P4")
-                & (pl.col("target") == "comm_bytes_total-log1p")
-                & (pl.col("quantity") == "share(total_parameters) minus share(n_samples) of output variance")
-            ).height,
-            1,
-        )
-        comparison = detail.filter(
-            (pl.col("practice") == "P4")
-            & (pl.col("target") == "comm_bytes_total-log1p")
-            & (pl.col("quantity") == "share(total_parameters) minus share(n_samples) of output variance")
-        ).row(0, named=True)
+        comparison = detail_row(detail, "comm_bytes_total-log1p", SHARE)
         self.assertAlmostEqual(comparison["value"], 0.0, delta=1e-9)
         self.assertFalse(comparison["holds"])
         self.assertEqual(summary.filter(pl.col("practice") == "P4")["outcome"].to_list(), [QUALIFIED])
@@ -472,47 +492,15 @@ class TestModelVersusDatasetSize(PracticeTestCase):
         row = summary.filter(pl.col("practice") == "P4").row(0, named=True)
         self.assertEqual(row["outcome"], NOT_TESTED)
         self.assertIn("not computable", row["reason"])
-        comparison = detail.filter(
-            (pl.col("practice") == "P4")
-            & (pl.col("target") == "comm_bytes_total-log1p")
-            & (pl.col("quantity") == "share(total_parameters) minus share(n_samples) of output variance")
-        ).row(0, named=True)
+        comparison = detail_row(detail, "comm_bytes_total-log1p", SHARE)
         self.assertGreater(comparison["n"], 0)
         self.assertIsNone(comparison["holds"])
 
     def test_absent_n_samples_term_has_zero_share(self) -> None:
         _, detail = run(corpus(), self.tables(), practices_config(size_max_outcome=MET))
-        quantity = "share(total_parameters) minus share(n_samples) of output variance"
-        self.assertEqual(
-            detail.filter(
-                (pl.col("practice") == "P4")
-                & (pl.col("target") == "comm_time_total_s-log1p")
-                & (pl.col("quantity") == quantity)
-            ).height,
-            1,
-        )
-        comparison = detail.filter(
-            (pl.col("practice") == "P4")
-            & (pl.col("target") == "comm_time_total_s-log1p")
-            & (pl.col("quantity") == quantity)
-        ).row(0, named=True)
-        self.assertTrue(comparison["holds"])
-        self.assertEqual(
-            detail.filter(
-                (pl.col("practice") == "P4")
-                & (pl.col("target") == "comm_time_total_s-log1p")
-                & (pl.col("quantity") == "share of output variance in terms containing the feature")
-                & (pl.col("feature") == "n_samples")
-            ).height,
-            1,
-        )
-        share = detail.filter(
-            (pl.col("practice") == "P4")
-            & (pl.col("target") == "comm_time_total_s-log1p")
-            & (pl.col("quantity") == "share of output variance in terms containing the feature")
-            & (pl.col("feature") == "n_samples")
-        ).row(0, named=True)
-        self.assertEqual(share["value"], 0.0)
+        target = "comm_time_total_s-log1p"
+        self.assertTrue(detail_row(detail, target, SHARE)["holds"])
+        self.assertEqual(detail_row(detail, target, FEATURE_SHARE, "n_samples")["value"], 0.0)
 
     def test_decile_extremes_do_not_decide_the_equation_comparison(self) -> None:
         evidence = dict(SUPPORTING)
@@ -584,6 +572,108 @@ class TestModelVersusDatasetSize(PracticeTestCase):
         row = summary_row(frame, self.tables(), practices_config(size_max_outcome=MET), "P4")
         self.assertEqual(row["outcome"], QUALIFIED)
         self.assertFalse(row["observed_holds"])
+
+
+class TestVarianceShares(PracticeTestCase):
+    BYTES = "comm_bytes_total-log1p"
+    TIME = "comm_time_total_s-log1p"
+
+    def columns(self, frame: pl.DataFrame) -> dict[str, np.ndarray]:
+        return {name: frame[name].to_numpy().astype(float) for name in ("total_parameters", "n_samples", "num_workers")}
+
+    def mixed_tables(self) -> Path:
+        tables = self.tables()
+        set_equation(
+            tables,
+            self.BYTES,
+            [
+                (atom("total_parameters"), 1.0),
+                (product("num_workers", "n_samples"), 0.5),
+                (atom("num_workers"), 40.0),
+                (product("total_parameters", "n_samples"), 0.001),
+            ],
+        )
+        return tables
+
+    def expected(self, frame: pl.DataFrame) -> dict[str, float]:
+        c = self.columns(frame)
+        contributions = [
+            ({"total_parameters"}, c["total_parameters"]),
+            ({"num_workers", "n_samples"}, 0.5 * c["num_workers"] * c["n_samples"]),
+            ({"num_workers"}, 40.0 * c["num_workers"]),
+            ({"total_parameters", "n_samples"}, 0.001 * c["total_parameters"] * c["n_samples"]),
+        ]
+        return oracle_shares(contributions, ("total_parameters", "n_samples"))
+
+    def test_shares_match_an_independent_computation_on_multi_feature_terms(self) -> None:
+        tables = self.mixed_tables()
+        frame = corpus(samples=(700, 300, 800, 500, 600, 100, 400, 200))
+        _, detail = run(frame, tables, practices_config(size_max_outcome=MET))
+        expected = self.expected(frame)
+        for feature in ("total_parameters", "n_samples"):
+            with self.subTest(feature=feature):
+                row = detail_row(detail, self.BYTES, FEATURE_SHARE, feature)
+                self.assertAlmostEqual(row["value"], expected[feature], places=9)
+        comparison = detail_row(detail, self.BYTES, SHARE)
+        self.assertAlmostEqual(comparison["value"], expected["total_parameters"] - expected["n_samples"], places=9)
+
+    def test_a_term_holding_both_features_cancels_from_the_gap(self) -> None:
+        tables = self.tables()
+        frame = corpus(samples=(700, 300, 800, 500, 600, 100, 400, 200))
+        both = product("total_parameters", "n_samples")
+        set_equation(tables, self.BYTES, [(atom("num_workers"), 40.0), (both, 0.01)])
+        _, detail = run(frame, tables, practices_config(size_max_outcome=MET))
+        comparison = detail_row(detail, self.BYTES, SHARE)
+        self.assertAlmostEqual(comparison["value"], 0.0, places=12)
+        self.assertGreater(detail_row(detail, self.BYTES, FEATURE_SHARE, "n_samples")["value"], 0.0)
+
+    def test_only_rows_with_the_target_enter_the_shares(self) -> None:
+        tables = self.mixed_tables()
+        terms = [(atom("total_parameters"), 1.0), (atom("n_samples"), 0.5), (atom("num_workers"), 40.0)]
+        set_equation(tables, self.TIME, terms)
+        frame = corpus(samples=(700, 300, 800, 500, 600, 100, 400, 200)).with_columns(
+            pl.when(pl.col("dataset") == "d0")
+            .then(None)
+            .otherwise(pl.col("comm_time_total_s"))
+            .alias("comm_time_total_s")
+        )
+        kept = frame.filter(pl.col("comm_time_total_s").is_not_null())
+        c = self.columns(kept)
+        expected = oracle_shares(
+            [
+                ({"total_parameters"}, c["total_parameters"]),
+                ({"n_samples"}, 0.5 * c["n_samples"]),
+                ({"num_workers"}, 40.0 * c["num_workers"]),
+            ],
+            ("total_parameters", "n_samples"),
+        )
+        summary, detail = run(frame, tables, practices_config(size_max_outcome=MET))
+        self.assertEqual(summary.filter(pl.col("practice") == "P4").height, 1)
+        for feature in ("total_parameters", "n_samples"):
+            with self.subTest(feature=feature):
+                row = detail_row(detail, self.TIME, FEATURE_SHARE, feature)
+                self.assertAlmostEqual(row["value"], expected[feature], places=9)
+                self.assertEqual(row["n"], kept.height)
+
+    def test_an_equation_without_terms_is_not_computable_instead_of_raising(self) -> None:
+        tables = self.tables()
+        set_equation(tables, self.BYTES, [])
+        summary, detail = run(corpus(), tables, practices_config(size_max_outcome=MET))
+        row = summary.filter(pl.col("practice") == "P4").row(0, named=True)
+        self.assertEqual(row["outcome"], NOT_TESTED)
+        self.assertIn("not computable", row["reason"])
+        self.assertIsNone(detail_row(detail, self.BYTES, SHARE)["holds"])
+
+    def test_load_corpus_keeps_the_columns_the_equations_use(self) -> None:
+        path = self.root / "corpus.csv"
+        corpus().with_columns(pl.lit(2.0).alias("max_layer_width")).write_csv(path)
+        frame = load_corpus(path)
+        self.assertIn("max_layer_width", frame.columns)
+        tables = self.tables()
+        terms = [(atom("total_parameters"), 1.0), (atom("max_layer_width"), 1.0), (atom("num_workers"), 5.0)]
+        set_equation(tables, self.TIME, terms)
+        _, detail = run(frame, tables, practices_config(size_max_outcome=MET))
+        self.assertTrue(np.isfinite(detail_row(detail, self.TIME, FEATURE_SHARE, "total_parameters")["value"]))
 
 
 class TestOutputs(PracticeTestCase):
@@ -1133,6 +1223,7 @@ class TestPracticesConfig(unittest.TestCase):
             {"size_rho": 0.0},
             {"size_share_gap": 0.0},
             {"size_share_gap": 1.5},
+            {"size_share_gap": -0.1},
             {"size_share_gap": float("nan")},
             {"size_max_outcome": "not tested"},
             {"async_time_diff": 0.1},

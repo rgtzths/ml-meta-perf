@@ -2,17 +2,17 @@
 
 Each practice pairs an observed comparison on the corpus with the equation evidence of an earlier
 FlexFL run (`feature_evidence.csv`, `term_frequency.csv` and `equation.json` per target), read
-rather than refitted. The outcome is ``not tested`` when a deciding comparison has too few matched
-units, the corpus lacks a needed column, or no relevant equation contains the feature (or its table
-is missing); ``met`` when the observed criterion holds and every required feature passes all four
-evidence filters with the expected sign and sits in at least the configured minimum number of stable
-terms; and ``qualified`` otherwise, including a contradicted practice. Every threshold comes from the
-``flexfl_practices`` section of ``config/study.json``.
+rather than refitted. P4 also evaluates each communication `equation.json` on the corpus rows to get
+the share of output variance carried by the terms containing each feature. The outcome is ``not tested``
+when a deciding comparison has too few matched units, the corpus lacks a needed column, or no relevant
+equation contains the feature (or its table is missing); ``met`` when the observed criterion holds and
+every required feature passes all four evidence filters with the expected sign and sits in at least the
+configured minimum number of stable terms; and ``qualified`` otherwise, including a contradicted practice.
+Every threshold comes from the ``flexfl_practices`` section of ``config/study.json``.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import subprocess
 import sys
@@ -62,22 +62,6 @@ UNITS = {
     "performance-regression": "mape (fraction)",
 }
 SLUGS = tuple(UNITS)
-COLUMNS = (
-    "dataset",
-    "fl_algo",
-    "strategy",
-    "combo",
-    "num_workers",
-    "main_metric",
-    "performance",
-    "total_time_s",
-    "n_epochs",
-    "comm_bytes_total",
-    "comm_time_total_s",
-    "compute_time_max_s",
-    "total_parameters",
-    "n_samples",
-)
 
 SUMMARY_SCHEMA = {
     "practice": pl.String,
@@ -249,10 +233,10 @@ def read_evidence(tables: Path, slug: str) -> Evidence | None:
 
 def variance_shares(
     found: Evidence, frame: pl.DataFrame, column: str, features: tuple[str, ...]
-) -> tuple[dict[str, float], int] | None:
+) -> dict[str, float] | None:
     rows = frame.filter(pl.col(column).is_not_null())
     used = {feature for term in found.equation.terms for feature in term.features}
-    if any(feature not in rows.columns for feature in used):
+    if not used or any(feature not in rows.columns for feature in used):
         return None
     columns = {feature: rows[feature].cast(pl.Float64).to_numpy() for feature in used}
     matrix = attribution.contributions(found.equation, columns)
@@ -271,7 +255,7 @@ def variance_shares(
         )
         for feature in features
     }
-    return shares, rows.height
+    return shares
 
 
 def support(
@@ -358,8 +342,10 @@ def check(
     )
 
 
-def describe(quantity: str, unit: str, value: float, n: int, **scope: str) -> Check:
-    return Check(quantity, unit, value, n, "", float("nan"), None, False, True, scope)
+def describe(
+    quantity: str, unit: str, value: float, n: int, *, part: str = "observed", source: str = "corpus", **scope: str
+) -> Check:
+    return Check(quantity, unit, value, n, "", float("nan"), None, False, True, scope, 0, part, source)
 
 
 def median(values: np.ndarray) -> float:
@@ -796,22 +782,24 @@ def model_vs_dataset_size(
             found = evidence[slug]
             assert found is not None
             column = slug.removesuffix("-log1p")
-            shares_result = variance_shares(found, frame, column, ("total_parameters", "n_samples"))
-            shares = shares_result[0] if shares_result is not None else None
+            shares = variance_shares(found, frame, column, ("total_parameters", "n_samples"))
             n = frame[column].drop_nulls().len()
             share_quantity = "share of output variance in terms containing the feature"
             share_unit = "fraction of output variance"
             source = f"{slug}/equation.json and corpus"
             for feature in ("total_parameters", "n_samples"):
-                descriptive = describe(
-                    share_quantity,
-                    share_unit,
-                    shares[feature] if shares is not None else float("nan"),
-                    n,
-                    target=slug,
-                    feature=feature,
+                checks.append(
+                    describe(
+                        share_quantity,
+                        share_unit,
+                        shares[feature] if shares is not None else float("nan"),
+                        n,
+                        part="equation",
+                        source=source,
+                        target=slug,
+                        feature=feature,
+                    )
                 )
-                checks.append(dataclasses.replace(descriptive, part="equation", source=source))
             comparison = check(
                 "share(total_parameters) minus share(n_samples) of output variance",
                 share_unit,
