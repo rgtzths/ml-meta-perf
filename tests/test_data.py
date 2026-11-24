@@ -10,6 +10,9 @@ from ml_meta_perf.data import (
     ALL_FEATURES,
     DATASET_COLUMN,
     DATASET_FEATURES,
+    FLEXFL_BLOCKS,
+    FLEXFL_DATASET_FEATURES,
+    FLEXFL_MODEL_FEATURES,
     MODEL_CAPABILITY,
     MODEL_COLUMN,
     MODEL_FAMILY,
@@ -19,6 +22,7 @@ from ml_meta_perf.data import (
     aggregate_by_dataset,
     columns_as_arrays,
     corpus_summary,
+    flexfl_block,
     groups,
     load,
     missing_cells,
@@ -216,6 +220,60 @@ class TestMissingCells(unittest.TestCase):
         sizes = frame.group_by(DATASET_COLUMN).agg(pl.col("nr_inst").first()).sort("nr_inst")
         smallest = set(sizes[DATASET_COLUMN].to_list()[: len(short)])
         self.assertEqual(short, smallest)
+
+
+class TestFlexFLBlocks(unittest.TestCase):
+    def test_blocks_partition_the_fit_features(self) -> None:
+        block_features = [feature for features in FLEXFL_BLOCKS.values() for feature in features]
+        self.assertCountEqual(block_features, FLEXFL_DATASET_FEATURES + FLEXFL_MODEL_FEATURES)
+        self.assertEqual(len(block_features), len(set(block_features)))
+
+    def test_every_feature_has_its_expected_block(self) -> None:
+        expected = {
+            "n_samples": "dataset",
+            "n_features": "dataset",
+            "n_classes": "dataset",
+            "is_classification": "dataset",
+            "is_categorical": "dataset",
+            "total_parameters": "architecture",
+            "n_layers": "architecture",
+            "mean_layer_width": "architecture",
+            "max_layer_width": "architecture",
+            "weight_decay": "architecture",
+            "fl_algo_CentralizedSync": "fl_config",
+            "fl_algo_CentralizedAsync": "fl_config",
+            "fl_algo_DecentralizedSync": "fl_config",
+            "fl_algo_DecentralizedAsync": "fl_config",
+            "strategy_iid": "fl_config",
+            "strategy_non_iid": "fl_config",
+            "strategy_dirichlet": "fl_config",
+            "learning_rate": "fl_config",
+            "batch_size": "fl_config",
+            "patience": "fl_config",
+            "delta": "fl_config",
+            "local_epochs": "fl_config",
+            "epoch_cap": "fl_config",
+            "alpha": "fl_config",
+            "distribution_percentage": "fl_config",
+            "feat_entropy_mean": "fl_config",
+            "feat_entropy_min": "fl_config",
+            "feat_entropy_max": "fl_config",
+            "feat_entropy_std": "fl_config",
+            "num_workers": "federation",
+            "n_atnog_test1": "federation",
+            "n_hobbit": "federation",
+            "n_samwise": "federation",
+            "worker_rate_mean": "federation",
+            "worker_rate_min": "federation",
+            "worker_rate_max": "federation",
+            "worker_rate_std": "federation",
+            "worker_rate_cv": "federation",
+        }
+        self.assertEqual({feature: flexfl_block(feature) for feature in expected}, expected)
+
+    def test_unknown_feature_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "nope"):
+            flexfl_block("nope")
 
 
 if __name__ == "__main__":

@@ -3,17 +3,22 @@
 import unittest
 
 import numpy as np
+import polars as pl
 
 from ml_meta_perf.attribution import (
     DATASET_ONLY,
     MIXED,
     MODEL_ONLY,
+    block_effects,
+    block_shares,
     classify,
+    classify_blocks,
     contributions,
     group_shares,
     term_effects,
     variance_decomposition,
 )
+from ml_meta_perf.data import FLEXFL_BLOCKS
 from ml_meta_perf.model import LOWERS, RAISES, Equation
 from ml_meta_perf.terms import Atom, Term
 
@@ -117,6 +122,151 @@ class TestGroupShares(unittest.TestCase):
         table = group_shares(only_dataset, columns(), DATASET, MODEL)
         shares = dict(zip(table["group"].to_list(), table["share"].to_list(), strict=True))
         self.assertAlmostEqual(shares[DATASET_ONLY], 1.0, places=6)
+
+
+def flexfl_equation() -> Equation:
+    return Equation(
+        intercept=0.5,
+        terms=(
+            Term("atom", (Atom("n_samples"),)),
+            Term("atom", (Atom("total_parameters"),)),
+            Term("atom", (Atom("learning_rate"),)),
+            Term("atom", (Atom("num_workers"),)),
+            Term("product", (Atom("n_samples"), Atom("num_workers"))),
+        ),
+        weights=(0.10, -0.20, 0.05, 0.15, -0.03),
+        standardized_weights=(0.3, -0.5, 0.2, 0.4, -0.1),
+    )
+
+
+def flexfl_columns(n: int = 60, seed: int = 0) -> dict[str, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    return {
+        "n_samples": rng.uniform(1.0, 5.0, n),
+        "total_parameters": rng.uniform(1.0, 5.0, n),
+        "learning_rate": rng.uniform(1.0, 5.0, n),
+        "num_workers": rng.uniform(1.0, 5.0, n),
+    }
+
+
+class TestFlexFLBlocks(unittest.TestCase):
+    def test_classifies_single_two_and_three_blocks_in_plan_order(self) -> None:
+        self.assertEqual(tuple(FLEXFL_BLOCKS), ("dataset", "architecture", "fl_config", "federation"))
+        self.assertEqual(classify_blocks(("n_samples",)), ("dataset", ("dataset",)))
+        self.assertEqual(
+            classify_blocks(("num_workers", "n_samples")),
+            (MIXED, ("dataset", "federation")),
+        )
+        self.assertEqual(
+            classify_blocks(("num_workers", "learning_rate", "n_samples")),
+            (MIXED, ("dataset", "fl_config", "federation")),
+        )
+
+    def test_empty_and_unknown_features_raise(self) -> None:
+        with self.assertRaises(ValueError):
+            classify_blocks(())
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            classify_blocks(("nope",))
+
+    def test_block_effects_report_spans_and_weighted_percentile_ranges(self) -> None:
+        equation = flexfl_equation()
+        data = flexfl_columns()
+        table = block_effects(equation, data)
+        self.assertEqual(
+            table.columns,
+            ["term", "group", "blocks", "weight", "beta", "effect", "direction"],
+        )
+        by_term = {row["term"]: row for row in table.iter_rows(named=True)}
+        expected_groups = {
+            "n_samples": ("dataset", "dataset"),
+            "total_parameters": ("architecture", "architecture"),
+            "learning_rate": ("fl_config", "fl_config"),
+            "num_workers": ("federation", "federation"),
+            "[n_samples] * [num_workers]": (MIXED, "dataset+federation"),
+        }
+        self.assertEqual(
+            {term: (row["group"], row["blocks"]) for term, row in by_term.items()},
+            expected_groups,
+        )
+        matrix = contributions(equation, data)
+        product_index = next(
+            index
+            for index, term in enumerate(equation.terms)
+            if set(term.features) == {"n_samples", "num_workers"}
+        )
+        weighted = matrix[:, product_index]
+        low, high = np.percentile(weighted, [10.0, 90.0])
+        product_name = equation.terms[product_index].name
+        self.assertAlmostEqual(by_term[product_name]["effect"], float(high - low))
+        effects = np.abs(table["effect"].to_numpy())
+        self.assertTrue((np.diff(effects) <= 1e-12).all())
+
+    def test_block_shares_are_partitioned_and_sum_to_one(self) -> None:
+        table = block_shares(flexfl_equation(), flexfl_columns())
+        self.assertEqual(
+            table["group"].to_list(),
+            ["dataset", "architecture", "fl_config", "federation", MIXED],
+        )
+        self.assertAlmostEqual(float(table["share"].sum()), 1.0, delta=1e-9)
+        self.assertEqual(table["n_terms"].to_list(), [1, 1, 1, 1, 1])
+        only_dataset = Equation(
+            intercept=0.0,
+            terms=(Term("atom", (Atom("n_samples"),)),),
+            weights=(1.0,),
+            standardized_weights=(1.0,),
+        )
+        unused = block_shares(only_dataset, flexfl_columns())
+        self.assertEqual(unused.filter(pl.col("group") == "architecture")["share"].item(), 0.0)
+
+    def test_single_block_takes_all_share_and_empty_equation_has_explicit_shapes(self) -> None:
+        only_dataset = Equation(
+            intercept=0.0,
+            terms=(Term("atom", (Atom("n_samples"),)),),
+            weights=(1.0,),
+            standardized_weights=(1.0,),
+        )
+        single = block_shares(only_dataset, flexfl_columns())
+        self.assertEqual(single.filter(pl.col("group") == "dataset")["share"].item(), 1.0)
+
+        empty = Equation(intercept=0.2, terms=(), weights=(), standardized_weights=())
+        effects = block_effects(empty, flexfl_columns())
+        self.assertEqual(
+            effects.columns,
+            ["term", "group", "blocks", "weight", "beta", "effect", "direction"],
+        )
+        self.assertEqual(effects.height, 0)
+        shares = block_shares(empty, flexfl_columns())
+        self.assertEqual(shares["group"].to_list(), ["dataset", "architecture", "fl_config", "federation", MIXED])
+        self.assertEqual(shares["share"].to_list(), [0.0] * 5)
+        self.assertEqual(shares["n_terms"].to_list(), [0] * 5)
+        self.assertEqual(float(shares["share"].sum()), 0.0)
+
+    def test_block_tables_carry_the_equation_weights_and_block_subtotals(self) -> None:
+        equation = flexfl_equation()
+        data = flexfl_columns()
+        effects = block_effects(equation, data)
+        for index, term in enumerate(equation.terms):
+            row = effects.filter(pl.col("term") == term.name).row(0, named=True)
+            self.assertEqual(row["weight"], equation.weights[index])
+            self.assertEqual(row["beta"], equation.standardized_weights[index])
+            self.assertEqual(row["direction"], RAISES if equation.standardized_weights[index] > 0 else LOWERS)
+
+        matrix = contributions(equation, data)
+        total = matrix.sum(axis=1)
+        shares = block_shares(equation, data)
+        by_group = {row["group"]: row for row in shares.iter_rows(named=True)}
+        subtotals = {
+            "dataset": matrix[:, [0]].sum(axis=1),
+            "architecture": matrix[:, [1]].sum(axis=1),
+            "fl_config": matrix[:, [2]].sum(axis=1),
+            "federation": matrix[:, [3]].sum(axis=1),
+            MIXED: matrix[:, [4]].sum(axis=1),
+        }
+        for group, subtotal in subtotals.items():
+            low, high = np.percentile(subtotal, [10.0, 90.0])
+            self.assertAlmostEqual(by_group[group]["effect_sum"], float(high - low))
+            expected = float(np.mean((subtotal - subtotal.mean()) * (total - total.mean())) / np.var(total))
+            self.assertAlmostEqual(by_group[group]["share"], expected)
 
 
 class TestVarianceDecomposition(unittest.TestCase):

@@ -27,7 +27,7 @@ import numpy as np
 import polars as pl
 
 from ml_meta_perf.analysis import feature_reach, grammar_ceiling, saturated_fit, screen
-from ml_meta_perf.attribution import group_shares, term_effects, variance_decomposition
+from ml_meta_perf.attribution import block_effects, block_shares, group_shares, term_effects, variance_decomposition
 from ml_meta_perf.config import Configuration, EffectsConfig, OpaqueConfig, SelectionConfig, load_config, margin_key
 from ml_meta_perf.data import (
     DATASET_COLUMN,
@@ -355,10 +355,10 @@ def run_flexfl(
         schema=schema,
     )
     columns = columns_as_arrays(frame, schema.features)
-    effects = term_effects(report.equation, columns, schema.dataset_features, schema.model_features)
+    effects = block_effects(report.equation, columns)
     label = schema.label
     effects = effects.with_columns(pl.col("direction").str.replace("MCC", label, literal=True))
-    shares = group_shares(report.equation, columns, schema.dataset_features, schema.model_features)
+    shares = block_shares(report.equation, columns)
     assert report.stability is not None
     terms = term_frequencies(effects, report.stability, frame[schema.dataset_column].n_unique())
     features = feature_evidence(

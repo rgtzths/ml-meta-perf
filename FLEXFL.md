@@ -159,8 +159,10 @@ corpus missing one of the three strategies, is skipped with a note on stderr and
 ## Commands
 
 ```bash
-# one E3 fit; also writes term_frequency.csv and feature_evidence.csv under
-# results/flexfl/<slug>/
+# one E3 fit; writes equation.json, equation.txt, curve.csv, term_effects.csv,
+# group_shares.csv, term_frequency.csv and feature_evidence.csv under results/flexfl/<slug>/
+# term_effects.csv reports each term's block span and weighted-contribution effect range
+# group_shares.csv has five rows of covariance shares
 ml-meta-perf --target total_time_s --log-target --data meta_dataset.csv
 
 # the same fit plus the baselines; adds baseline_comparison.csv
@@ -172,6 +174,10 @@ ml-meta-perf --target comm_bytes_total --log-target --data meta_dataset.csv --ex
 # the configuration sweep on the same target
 ml-meta-perf-search --target total_time_s --log-target --data meta_dataset.csv --output results/sweep_time
 ```
+
+`term_effects.csv` has a `group` column (`dataset`, `architecture`, `fl_config`, `federation` or `mixed`),
+and `blocks` lists the blocks a term spans. Its `effect` is the 10th-to-90th percentile range of the weighted
+contribution. `group_shares.csv` has five rows, whose covariance shares sum to 1 when the equation output varies.
 
 The sweep fits the same grid as for MCC. FlexFL targets have no go/no-go threshold and no
 model ranking to score, so the DHO task-metric columns of `candidates.csv` are empty, and
