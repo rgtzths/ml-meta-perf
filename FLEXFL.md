@@ -171,16 +171,18 @@ nothing. Every threshold is in the `flexfl_practices` section of `config/study.j
 - P3, non-IID and Dirichlet splits need more epochs and reach lower performance than IID. Paired on dataset,
   algorithm and worker combination; MCC is higher-better, mape lower-better.
 - P4, parameter count drives communication bytes and time more than dataset size. Spearman correlations over
-  the per-dataset medians; capped by `size_max_outcome`, since each dataset has one network. The equation
-  comparison contrasts decile extremes of dataset-constant features, so each side is one dataset, and the two
-  features' extremes are different datasets.
+  the per-dataset medians; capped by `size_max_outcome`, since each dataset has one network. In each communication
+  equation, terms containing `total_parameters` must carry at least `size_share_gap` more of output variance than
+  terms containing `n_samples`, using population covariance with the equation total, over every corpus row that has the
+  target (the row set the communication fits use, with no task-type restriction).
 
 A practice is `not tested` when a deciding comparison has fewer matched units than `min_pairs`, the
 corpus lacks a column it needs, or no relevant equation contains its feature (or that target's table is
 missing). It is `met` when its observed criterion holds and every required feature passes all four
 `feature_evidence.csv` filters with the expected sign and sits in at least `flexfl_practices.min_stable_terms`
-terms, each reselected in at least `effects.min_frequency` of the exclusions (P4 also needs a larger
-|decile difference| for `total_parameters` than for `n_samples`), and `qualified` otherwise, including a
+terms, each reselected in at least `effects.min_frequency` of the exclusions (P4 also needs the share of output
+variance in terms containing `total_parameters` to exceed that for `n_samples` by at least
+`flexfl_practices.size_share_gap` in each communication equation), and `qualified` otherwise, including a
 contradicted practice. A not-tested reason also names any observed criterion that failed. Spearman comparisons
 need at least `flexfl_practices.min_datasets` datasets. A comparison that cannot be computed (a constant
 column, or no finite pair) is reported as `not computable`, and one with too few matched units as
@@ -196,11 +198,11 @@ another threshold), and `total_parameters` or `n_samples` varies within a datase
 `observed_holds`, `equation_holds` (empty when not computable), the outcome and its reason, the practice's
 thresholds, the corpus digest and the commit. `practices_detail.csv` has one row per number, with its family,
 algorithm, split, task or target, unit, comparison direction, threshold, whether it holds and decides, and the
-source file (`corpus`, or the target's `feature_evidence.csv` or `term_frequency.csv`). `decides` marks the rows
+source (`corpus`, the target's `feature_evidence.csv` or `term_frequency.csv`, or for P4's share rows the target's `equation.json` evaluated on the corpus). `decides` marks the rows
 the outcome rests on; per-algorithm and descriptive rows are reported only. On equation rows, `decile_difference`
 holds when its sign is the expected one and `supported` when the feature also passes all four filters in a
 stable term; a feature shared by several parts appears once, with the parts in `note`. On corpus rows, `note`
-is `not computable` when the value could not be computed and `N non-finite units dropped` when pairs (P1, P3)
+is `not computable` when the value could not be computed (for a P4 share: a term feature missing from the corpus, a non-finite value, an equation with no terms, or zero output variance) and `N non-finite units dropped` when pairs (P1, P3)
 or cells (P2) with a non-finite value were left out, joined by `; ` when both apply. Time and byte differences
 are on the log1p scale; mape is a fraction.
 

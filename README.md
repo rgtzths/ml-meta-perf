@@ -286,6 +286,7 @@ effective configuration. E1, E2 and E3 share every one of these values.
 | `flexfl_practices.non_iid_mape_diff` | 0.02 | P3: smallest median skewed-iid mape difference |
 | `flexfl_practices.size_rho` | 0.74 | P4: Spearman bar over the per-dataset medians (n=8 critical value) |
 | `flexfl_practices.size_collinear_rho` | 0.74 | P4: parameter count and dataset size count as collinear at or above this |
+| `flexfl_practices.size_share_gap` | 0.10 | P4: smallest share of output variance by which total_parameters must exceed n_samples |
 | `flexfl_practices.size_max_outcome` | qualified | P4: highest outcome the practice can reach |
 | `opaque.forest_trees` | 100 | random forest size |
 | `opaque.forest_max_features` | 0.33 | share of features considered at each forest split |

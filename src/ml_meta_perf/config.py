@@ -152,12 +152,13 @@ class PracticesConfig:
     non_iid_mape_diff: float
     size_rho: float
     size_collinear_rho: float
+    size_share_gap: float
     size_max_outcome: str
 
     def __post_init__(self) -> None:
         if self.min_pairs < 2:
             raise ValueError(f"min_pairs must be at least 2, got {self.min_pairs}")
-        for name in ("size_rho", "size_collinear_rho"):
+        for name in ("size_rho", "size_collinear_rho", "size_share_gap"):
             value = getattr(self, name)
             if not 0.0 < value <= 1.0:
                 raise ValueError(f"{name} must lie in (0, 1], got {value}")

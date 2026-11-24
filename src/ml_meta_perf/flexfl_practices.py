@@ -2,12 +2,13 @@
 
 Each practice pairs an observed comparison on the corpus with the equation evidence of an earlier
 FlexFL run (`feature_evidence.csv`, `term_frequency.csv` and `equation.json` per target), read
-rather than refitted. The outcome is ``not tested`` when a deciding comparison has too few matched
-units, the corpus lacks a needed column, or no relevant equation contains the feature (or its table
-is missing); ``met`` when the observed criterion holds and every required feature passes all four
-evidence filters with the expected sign and sits in at least the configured minimum number of stable
-terms; and ``qualified`` otherwise, including a contradicted practice. Every threshold comes from the
-``flexfl_practices`` section of ``config/study.json``.
+rather than refitted. P4 also evaluates each communication `equation.json` on the corpus rows to get
+the share of output variance carried by the terms containing each feature. The outcome is ``not tested``
+when a deciding comparison has too few matched units, the corpus lacks a needed column, or no relevant
+equation contains the feature (or its table is missing); ``met`` when the observed criterion holds and
+every required feature passes all four evidence filters with the expected sign and sits in at least the
+configured minimum number of stable terms; and ``qualified`` otherwise, including a contradicted practice.
+Every threshold comes from the ``flexfl_practices`` section of ``config/study.json``.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import numpy as np
 import polars as pl
 from jsonargparse import ActionConfigFile, ArgumentParser  # pyright: ignore[reportPrivateImportUsage]
 
+from ml_meta_perf import attribution
 from ml_meta_perf.config import (
     DEFAULT_CONFIG_PATH,
     MET,
@@ -60,22 +62,6 @@ UNITS = {
     "performance-regression": "mape (fraction)",
 }
 SLUGS = tuple(UNITS)
-COLUMNS = (
-    "dataset",
-    "fl_algo",
-    "strategy",
-    "combo",
-    "num_workers",
-    "main_metric",
-    "performance",
-    "total_time_s",
-    "n_epochs",
-    "comm_bytes_total",
-    "comm_time_total_s",
-    "compute_time_max_s",
-    "total_parameters",
-    "n_samples",
-)
 
 SUMMARY_SCHEMA = {
     "practice": pl.String,
@@ -195,6 +181,7 @@ class Evidence:
     terms: pl.DataFrame
     term_features: dict[str, tuple[str, ...]]
     corpus_sha256: str | None
+    equation: Equation
 
 
 @dataclass(frozen=True)
@@ -240,7 +227,35 @@ def read_evidence(tables: Path, slug: str) -> Evidence | None:
         terms=pl.read_csv(paths[1]),
         term_features={term.name: term.features for term in equation.terms},
         corpus_sha256=digest,
+        equation=equation,
     )
+
+
+def variance_shares(
+    found: Evidence, frame: pl.DataFrame, column: str, features: tuple[str, ...]
+) -> dict[str, float] | None:
+    rows = frame.filter(pl.col(column).is_not_null())
+    used = {feature for term in found.equation.terms for feature in term.features}
+    if not used or any(feature not in rows.columns for feature in used):
+        return None
+    columns = {feature: rows[feature].cast(pl.Float64).to_numpy() for feature in used}
+    matrix = attribution.contributions(found.equation, columns)
+    total = matrix.sum(axis=1)
+    variance = float(np.var(total))
+    if not np.isfinite(total).all() or variance <= 1e-15:
+        return None
+    centered_total = total - np.mean(total)
+    shares = {
+        feature: float(
+            sum(
+                np.mean((matrix[:, index] - np.mean(matrix[:, index])) * centered_total) / variance
+                for index, term in enumerate(found.equation.terms)
+                if feature in term.features
+            )
+        )
+        for feature in features
+    }
+    return shares
 
 
 def support(
@@ -327,8 +342,10 @@ def check(
     )
 
 
-def describe(quantity: str, unit: str, value: float, n: int, **scope: str) -> Check:
-    return Check(quantity, unit, value, n, "", float("nan"), None, False, True, scope)
+def describe(
+    quantity: str, unit: str, value: float, n: int, *, part: str = "observed", source: str = "corpus", **scope: str
+) -> Check:
+    return Check(quantity, unit, value, n, "", float("nan"), None, False, True, scope, 0, part, source)
 
 
 def median(values: np.ndarray) -> float:
@@ -762,24 +779,46 @@ def model_vs_dataset_size(
         parts.append(Part(f"total_parameters raises {slug}", (model,)))
         context += [data, *[item for item in carriers if item.present]]
         if model.present:
-            rival = abs(data.row["decile_difference"]) if data.present else 0.0
+            found = evidence[slug]
+            assert found is not None
+            column = slug.removesuffix("-log1p")
+            shares = variance_shares(found, frame, column, ("total_parameters", "n_samples"))
+            n = frame[column].drop_nulls().len()
+            share_quantity = "share of output variance in terms containing the feature"
+            share_unit = "fraction of output variance"
+            source = f"{slug}/equation.json and corpus"
+            for feature in ("total_parameters", "n_samples"):
+                checks.append(
+                    describe(
+                        share_quantity,
+                        share_unit,
+                        shares[feature] if shares is not None else float("nan"),
+                        n,
+                        part="equation",
+                        source=source,
+                        target=slug,
+                        feature=feature,
+                    )
+                )
             comparison = check(
-                "|decile difference total_parameters| minus |decile difference n_samples|",
-                UNITS[slug],
-                abs(model.row["decile_difference"]) - rival,
-                1,
-                ">",
-                0.0,
+                "share(total_parameters) minus share(n_samples) of output variance",
+                share_unit,
+                shares["total_parameters"] - shares["n_samples"] if shares is not None else float("nan"),
+                n,
+                ">=",
+                config.size_share_gap,
                 1,
                 part="equation",
-                source=f"{slug}/feature_evidence.csv",
+                source=source,
                 target=slug,
             )
             checks.append(comparison)
-            larger = bool(comparison.holds)
-            larger_all &= larger
-            if not larger:
-                failures.append(f"{slug}: n_samples has the larger decile difference")
+            larger_all &= comparison.holds is True
+            if comparison.holds is False:
+                failures.append(
+                    f"{slug}: share(total_parameters) minus share(n_samples) is {comparison.value:.3f}, "
+                    f"below {config.size_share_gap}"
+                )
         named = [item.feature for item in carriers if item.supported]
         if named:
             failures.append(f"{slug}: architecture effect carried by {', '.join(named)}")
@@ -885,22 +924,23 @@ PRACTICES = (
         "P4",
         "Model size (parameter count) drives communication bytes and time more than dataset size.",
         ("dataset", "comm_bytes_total", "comm_time_total_s", "total_parameters", "n_samples"),
-        ("size_rho", "size_collinear_rho", "size_max_outcome", "min_datasets", "min_stable_terms"),
+        ("size_rho", "size_collinear_rho", "size_share_gap", "size_max_outcome", "min_datasets", "min_stable_terms"),
         model_vs_dataset_size,
         lambda c: (
             f"Across at least {c.min_datasets} datasets, per-dataset median log1p of comm_bytes_total and of "
             f"comm_time_total_s: Spearman with total_parameters >= {c.size_rho} and |Spearman| with n_samples < "
             f"{c.size_rho}. Not tested when |Spearman(total_parameters, n_samples)| >= {c.size_collinear_rho}. "
-            "Equation: total_parameters raises both targets, passes all four filters and has a larger "
-            "|decile difference| than n_samples. Outcome capped at "
+            "Equation: total_parameters raises both targets, passes all four filters, and carries at least "
+            f"{c.size_share_gap} more of the equation's output variance (terms containing the feature, population "
+            "covariance with the equation total) than n_samples, in each communication equation. Outcome capped at "
             f"{c.size_max_outcome}."
         ),
         (
             "Each dataset has one fixed network, so parameter count and dataset size vary only across the datasets, "
             "never within one, and cannot be separated from dataset identity. Bytes are parameters times messages "
             "by construction (the analytic message model), so 'model size drives bytes' is partly true by definition. "
-            "The equation comparison contrasts decile extremes of dataset-constant features, so each side is one "
-            "dataset, and the two features' extremes are different datasets."
+            "The share credits a feature with the whole of every term containing it, so two features that share a "
+            "term overlap, and it describes the fitted equation, not the loss from removing the feature."
         ),
         cap_field="size_max_outcome",
     ),
@@ -953,7 +993,6 @@ def judge(
 
 def load_corpus(path: str | Path) -> pl.DataFrame:
     frame = pl.read_csv(path, infer_schema_length=None)
-    frame = frame.select([column for column in COLUMNS if column in frame.columns])
     if "combo" in frame.columns:
         frame = frame.with_columns(pl.col("combo").cast(pl.String))
     return frame
