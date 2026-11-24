@@ -22,6 +22,7 @@ Study chapter: [3. Term generation and selection][study-chapter] -- the rational
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -132,6 +133,56 @@ class EffectsConfig:
             raise KeyError(f"{slug!r} is not configured; configured slugs: {configured}") from None
 
 
+MET = "met"
+QUALIFIED = "qualified"
+NOT_TESTED = "not tested"
+
+
+@dataclass(frozen=True)
+class PracticesConfig:
+    min_pairs: int
+    min_datasets: int
+    min_stable_terms: int
+    async_time_diff: float
+    async_epoch_diff: float
+    async_bytes_diff: float
+    workers_elasticity_gap: float
+    non_iid_epoch_diff: float
+    non_iid_mcc_diff: float
+    non_iid_mape_diff: float
+    size_rho: float
+    size_collinear_rho: float
+    size_max_outcome: str
+
+    def __post_init__(self) -> None:
+        if self.min_pairs < 2:
+            raise ValueError(f"min_pairs must be at least 2, got {self.min_pairs}")
+        for name in ("size_rho", "size_collinear_rho"):
+            value = getattr(self, name)
+            if not 0.0 < value <= 1.0:
+                raise ValueError(f"{name} must lie in (0, 1], got {value}")
+        if self.min_datasets < 3:
+            raise ValueError(f"min_datasets must be at least 3, got {self.min_datasets}")
+        if self.min_stable_terms < 1:
+            raise ValueError(f"min_stable_terms must be at least 1, got {self.min_stable_terms}")
+        for name in ("async_time_diff", "non_iid_mcc_diff"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value <= 0.0):
+                raise ValueError(f"{name} must be finite and at most 0, got {value}")
+        for name in (
+            "async_epoch_diff",
+            "async_bytes_diff",
+            "workers_elasticity_gap",
+            "non_iid_epoch_diff",
+            "non_iid_mape_diff",
+        ):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value >= 0.0):
+                raise ValueError(f"{name} must be finite and at least 0, got {value}")
+        if self.size_max_outcome not in (MET, QUALIFIED):
+            raise ValueError(f"size_max_outcome must be 'met' or 'qualified', got {self.size_max_outcome!r}")
+
+
 def margin_key(schema: Schema) -> str:
     if schema.target_column == "performance":
         return schema.slug
@@ -147,6 +198,7 @@ class StudyConfig:
     opaque: OpaqueConfig
     sweep: SweepConfig
     effects: EffectsConfig
+    flexfl_practices: PracticesConfig
 
 
 def parse_config(payload: dict[str, Any]) -> StudyConfig:
@@ -157,6 +209,7 @@ def parse_config(payload: dict[str, Any]) -> StudyConfig:
         selection=SelectionConfig(**payload["selection"]),
         opaque=OpaqueConfig(**payload["opaque"]),
         effects=EffectsConfig(**payload["effects"]),
+        flexfl_practices=PracticesConfig(**payload["flexfl_practices"]),
         sweep=SweepConfig(
             zscores=tuple(float(value) for value in sweep["zscores"]),
             penalties=tuple(float(value) for value in sweep["penalties"]),

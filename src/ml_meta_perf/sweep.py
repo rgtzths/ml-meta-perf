@@ -51,6 +51,7 @@ from ml_meta_perf.config import (
     Configuration,
     EffectsConfig,
     OpaqueConfig,
+    PracticesConfig,
     SelectionConfig,
     StudyConfig,
     SweepConfig,
@@ -172,6 +173,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--opaque", type=OpaqueConfig, help="carried into the proposal unchanged")
     parser.add_argument("--effects", type=EffectsConfig, help="the feature evidence filters")
     parser.add_argument("--sweep", type=SweepConfig, help="the grid and the choice among close candidates")
+    parser.add_argument("--flexfl_practices", type=PracticesConfig, help="carried into the proposal unchanged")
     parser.add_argument("--data", type=str | None, default=None, help="meta-dataset CSV")
     add_target_arguments(parser)
     parser.add_argument("--output", type=str, default="results/sweep", help="directory for the sweep outputs")
@@ -194,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         opaque=arguments.opaque,
         sweep=arguments.sweep,
         effects=arguments.effects,
+        flexfl_practices=arguments.flexfl_practices,
     )
     points = grid(study)
     output = Path(arguments.output)

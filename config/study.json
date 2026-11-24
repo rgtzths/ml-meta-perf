@@ -41,5 +41,20 @@
     "arities": [2, 3],
     "readable_terms": 20,
     "band": 0.02
+  },
+  "flexfl_practices": {
+    "min_pairs": 30,
+    "min_datasets": 3,
+    "min_stable_terms": 1,
+    "async_time_diff": -0.10,
+    "async_epoch_diff": 2.0,
+    "async_bytes_diff": 0.10,
+    "workers_elasticity_gap": 0.10,
+    "non_iid_epoch_diff": 2.0,
+    "non_iid_mcc_diff": -0.02,
+    "non_iid_mape_diff": 0.02,
+    "size_rho": 0.74,
+    "size_collinear_rho": 0.74,
+    "size_max_outcome": "qualified"
   }
 }
