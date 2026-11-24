@@ -32,6 +32,8 @@ from ml_meta_perf.experiment import (
 )
 from tests import corpus
 
+DOCUMENTED_SECTIONS = ("search", "selection", "effects", "flexfl_practices", "opaque")
+
 
 def scored(table, prefix: str) -> float:
     """R2 of the comparison row whose label starts with ``prefix``.
@@ -294,27 +296,32 @@ class TestDocumentedDefaults(unittest.TestCase):
         readme = Path(__file__).resolve().parent.parent / "README.md"
         if not readme.is_file():
             raise unittest.SkipTest("README is not installed beside the package")
+        sections = "|".join(DOCUMENTED_SECTIONS)
         cls.documented = {
             match.group(1): match.group(2)
-            for match in re.finditer(
-                r"^\| `((?:search|selection|opaque)\.\w+)` \| ([\d.]+) \|", readme.read_text(), re.MULTILINE
-            )
+            for match in re.finditer(rf"^\| `((?:{sections})\.\w+)` \| ([^|]+?) \|", readme.read_text(), re.MULTILINE)
         }
         cls.study = load_config()
 
     def test_every_hyperparameter_is_documented(self) -> None:
         expected = {
             f"{section}.{field.name}"
-            for section in ("search", "selection", "opaque")
+            for section in DOCUMENTED_SECTIONS
             for field in dataclasses.fields(getattr(self.study, section))
         }
         self.assertEqual(sorted(expected - set(self.documented)), [], "README omits a hyperparameter")
 
     def test_documented_values_match_the_configuration_file(self) -> None:
-        for key, value in self.documented.items():
+        for key, text in self.documented.items():
             section, name = key.split(".")
+            held = getattr(getattr(self.study, section), name)
             with self.subTest(key=key):
-                self.assertEqual(float(value), float(getattr(getattr(self.study, section), name)))
+                if isinstance(held, dict):
+                    self.assertEqual(text, "per target")
+                elif isinstance(held, str):
+                    self.assertEqual(text, held)
+                else:
+                    self.assertEqual(float(text), float(held))
 
 
 if __name__ == "__main__":

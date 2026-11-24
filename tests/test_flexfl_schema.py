@@ -15,7 +15,7 @@ import numpy as np
 import polars as pl
 
 from ml_meta_perf import cli, experiment, sweep
-from ml_meta_perf.config import EffectsConfig, default_configuration, load_config
+from ml_meta_perf.config import EffectsConfig, default_configuration, load_config, parse_config
 from ml_meta_perf.data import (
     ALL_FEATURES,
     FLEXFL_COST_TARGETS,
@@ -710,6 +710,17 @@ class FlexFLSchemaTests(unittest.TestCase):
                 self.assertTrue(table[column].is_null().all() or table[column].is_nan().all(), column)
             self.assertTrue(np.isfinite(table["smoothed_floor"].to_numpy()).all())
             self.assertTrue((out / "curves.csv").is_file())
+
+    def test_search_cli_proposes_the_shipped_practice_thresholds(self) -> None:
+        shipped = load_config().flexfl_practices
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(sweep.main(search_argv(out)), 0)
+            proposed = json.loads((out / "proposed_study.json").read_text())
+        self.assertIn("flexfl_practices", proposed)
+        self.assertEqual(proposed["flexfl_practices"], dataclasses.asdict(shipped))
+        self.assertEqual(parse_config(proposed).flexfl_practices, shipped)
 
     def test_search_cli_runs_performance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
