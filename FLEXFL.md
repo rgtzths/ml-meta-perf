@@ -164,34 +164,45 @@ nothing. Every threshold is in the `flexfl_practices` section of `config/study.j
 
 - P1, asynchronous algorithms shorten wall time but need more epochs or bytes. Async minus sync, paired on
   dataset, distribution and worker combination within the Centralized and the Decentralized family.
-- P2, more workers raise communication volume and time faster than they cut compute time. Elasticity here is the OLS slope of `log1p(y)` on
-  `log(num_workers)`, a log1p-scale slope and not a log-log elasticity, of
-  `comm_bytes_total`, `comm_time_total_s` and `compute_time_max_s` within each dataset,
-  algorithm and distribution, pooled and per algorithm.
+- P2, more workers raise communication volume and time faster than they cut compute time. Elasticity here is
+  the OLS slope of `log1p(y)` on `log(num_workers)`, a log1p-scale slope and not a log-log elasticity, of
+  `comm_bytes_total`, `comm_time_total_s` and `compute_time_max_s` within each dataset, algorithm and
+  distribution, pooled and per algorithm. A cell whose elasticity is not finite is dropped and counted.
 - P3, non-IID and Dirichlet splits need more epochs and reach lower performance than IID. Paired on dataset,
   algorithm and worker combination; MCC is higher-better, mape lower-better.
 - P4, parameter count drives communication bytes and time more than dataset size. Spearman correlations over
-  the per-dataset medians; capped by `size_max_outcome`, since each dataset has one network. The equation comparison contrasts decile extremes of dataset-constant features, so each side is
-  one dataset, and the two features' extremes are different datasets.
+  the per-dataset medians; capped by `size_max_outcome`, since each dataset has one network. The equation
+  comparison contrasts decile extremes of dataset-constant features, so each side is one dataset, and the two
+  features' extremes are different datasets.
 
 A practice is `not tested` when a deciding comparison has fewer matched units than `min_pairs`, the
 corpus lacks a column it needs, or no relevant equation contains its feature (or that target's table is
 missing). It is `met` when its observed criterion holds and every required feature passes all four
-`feature_evidence.csv` filters with the expected sign and sits in at least `flexfl_practices.min_stable_terms` term(s) reselected in at least
-`effects.min_frequency` of the exclusions (P4 also needs a larger |decile difference| for `total_parameters`
-than for `n_samples`), and `qualified` otherwise, including a contradicted practice. A not-tested reason also
-names any observed criterion that failed. Spearman comparisons need at least `flexfl_practices.min_datasets` datasets to be computable.
-The run stops when a table's `baseline_comparison.csv` names another corpus, and records tables without one.
+`feature_evidence.csv` filters with the expected sign and sits in at least `flexfl_practices.min_stable_terms`
+terms, each reselected in at least `effects.min_frequency` of the exclusions (P4 also needs a larger
+|decile difference| for `total_parameters` than for `n_samples`), and `qualified` otherwise, including a
+contradicted practice. A not-tested reason also names any observed criterion that failed. Spearman comparisons
+need at least `flexfl_practices.min_datasets` datasets. A comparison that cannot be computed (a constant
+column, or no finite pair) is reported as `not computable`, and one with too few matched units as
+`too few matched units`.
+
+The run stops, rather than recording a result, in three cases: a table's `baseline_comparison.csv` names
+another corpus, a table's `pass_frequency` disagrees with `effects.min_frequency` (the tables were fitted with
+another threshold), and `total_parameters` or `n_samples` varies within a dataset. Tables without a
+`baseline_comparison.csv` are recorded. `tables_corpus_check` also lists the fit margins of each table
+(`fit margins <slug>=<margin>; ...`).
 
 `practices.csv` has one row per practice with the criterion, the observed and equation evidence as text,
 `observed_holds`, `equation_holds` (empty when not computable), the outcome and its reason, the practice's
-thresholds, the corpus digest and the commit. `practices_detail.csv` has one row per number, with its family, algorithm, split,
-task or target, unit, comparison direction, threshold, whether it holds and decides, and the source file
-(`corpus`, or the target's `feature_evidence.csv` or `term_frequency.csv`). `decides` marks the rows the
-outcome rests on; per-algorithm and descriptive rows are reported only. On equation rows, `decile_difference`
+thresholds, the corpus digest and the commit. `practices_detail.csv` has one row per number, with its family,
+algorithm, split, task or target, unit, comparison direction, threshold, whether it holds and decides, and the
+source file (`corpus`, or the target's `feature_evidence.csv` or `term_frequency.csv`). `decides` marks the rows
+the outcome rests on; per-algorithm and descriptive rows are reported only. On equation rows, `decile_difference`
 holds when its sign is the expected one and `supported` when the feature also passes all four filters in a
-stable term; a feature shared by several parts appears once, with the parts in `note`. Time and byte
-differences are on the log1p scale; mape is a fraction.
+stable term; a feature shared by several parts appears once, with the parts in `note`. On corpus rows, `note`
+is `not computable` when the value could not be computed and `N non-finite units dropped` when pairs (P1, P3)
+or cells (P2) with a non-finite value were left out, joined by `; ` when both apply. Time and byte differences
+are on the log1p scale; mape is a fraction.
 
 ## Commands
 

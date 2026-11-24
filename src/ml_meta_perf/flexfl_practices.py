@@ -5,9 +5,9 @@ FlexFL run (`feature_evidence.csv`, `term_frequency.csv` and `equation.json` per
 rather than refitted. The outcome is ``not tested`` when a deciding comparison has too few matched
 units, the corpus lacks a needed column, or no relevant equation contains the feature (or its table
 is missing); ``met`` when the observed criterion holds and every required feature passes all four
-evidence filters with the expected sign and sits in at least one stable term; and ``qualified``
-otherwise, including a contradicted practice. Every threshold comes from the ``flexfl_practices``
-section of ``config/study.json``.
+evidence filters with the expected sign and sits in at least the configured minimum number of stable
+terms; and ``qualified`` otherwise, including a contradicted practice. Every threshold comes from the
+``flexfl_practices`` section of ``config/study.json``.
 """
 
 from __future__ import annotations
@@ -132,6 +132,7 @@ class Check:
     dropped: int = 0
     part: str = "observed"
     source: str = "corpus"
+    minimum: int = 1
 
 
 @dataclass(frozen=True)
@@ -149,8 +150,7 @@ class Support:
     state: str
     row: dict[str, float]
     terms: tuple[tuple[str, str, float, float], ...]
-    min_frequency: float
-    min_terms: int
+    stability: Stability
 
     @property
     def present(self) -> bool:
@@ -158,7 +158,7 @@ class Support:
 
     @property
     def stable_terms(self) -> int:
-        return sum(frequency >= self.min_frequency for _, _, _, frequency in self.terms)
+        return sum(frequency >= self.stability.min_frequency for _, _, _, frequency in self.terms)
 
     @property
     def supported(self) -> bool:
@@ -166,7 +166,7 @@ class Support:
             self.present
             and bool(self.row["passes_all"])
             and float(np.sign(self.row["decile_difference"])) == self.expected
-            and self.stable_terms >= self.min_terms
+            and self.stable_terms >= self.stability.min_terms
         )
 
 
@@ -248,7 +248,7 @@ def support(
 ) -> Support:
     found = evidence.get(slug)
     if found is None:
-        return Support(slug, feature, expected, role, MISSING, {}, (), stability.min_frequency, stability.min_terms)
+        return Support(slug, feature, expected, role, MISSING, {}, (), stability)
     names = [name for name, features in found.term_features.items() if feature in features]
     spans = tuple(
         (str(row["term"]), str(row["blocks"]), float(row["effect"]), float(row["frequency"]))
@@ -256,7 +256,7 @@ def support(
     )
     rows = found.features.filter(pl.col("feature") == feature)
     if rows.height == 0:
-        return Support(slug, feature, expected, role, ABSENT, {}, spans, stability.min_frequency, stability.min_terms)
+        return Support(slug, feature, expected, role, ABSENT, {}, spans, stability)
     row = rows.row(0, named=True)
     numbers = {
         name: float(row[name])
@@ -273,7 +273,7 @@ def support(
             "passes_all",
         )
     }
-    return Support(slug, feature, expected, role, PRESENT, numbers, spans, stability.min_frequency, stability.min_terms)
+    return Support(slug, feature, expected, role, PRESENT, numbers, spans, stability)
 
 
 def holds(value: float, direction: str, threshold: float) -> bool:
@@ -323,6 +323,7 @@ def check(
         dropped,
         part,
         source,
+        minimum if decides else 1,
     )
 
 
@@ -477,7 +478,7 @@ def elasticity(workers: np.ndarray, values: np.ndarray) -> float:
     return float(np.polyfit(np.log(workers), np.log1p(values), 1)[0])
 
 
-def cell_elasticities(frame: pl.DataFrame) -> pl.DataFrame:
+def cell_elasticities(frame: pl.DataFrame) -> tuple[pl.DataFrame, int]:
     rows: list[dict[str, object]] = []
     for (dataset, algorithm, strategy), cell in frame.group_by(["dataset", "fl_algo", "strategy"], maintain_order=True):
         workers = cell["num_workers"].to_numpy().astype(float)
@@ -493,13 +494,15 @@ def cell_elasticities(frame: pl.DataFrame) -> pl.DataFrame:
         )
     schema = {"dataset": pl.String, "fl_algo": pl.String, "strategy": pl.String}
     schema |= {name: pl.Float64 for name in ("bytes", "comm_time", "compute_max")}
-    return pl.DataFrame(rows, schema=schema).drop_nans()
+    cells = pl.DataFrame(rows, schema=schema)
+    finite = cells.drop_nans()
+    return finite, cells.height - finite.height
 
 
 def workers_vs_communication(
     frame: pl.DataFrame, evidence: dict[str, Evidence | None], config: PracticesConfig, stability: Stability
 ) -> Assessment:
-    cells = cell_elasticities(frame)
+    cells, skipped = cell_elasticities(frame)
     checks: list[Check] = []
     gap = config.workers_elasticity_gap
     for algorithm in ("all", *ALGORITHMS):
@@ -517,6 +520,7 @@ def workers_vs_communication(
                 0.0,
                 config.min_pairs,
                 decides=decides,
+                dropped=skipped if decides else 0,
                 algorithm=algorithm,
             ),
             check(
@@ -528,6 +532,7 @@ def workers_vs_communication(
                 0.0,
                 config.min_pairs,
                 decides=decides,
+                dropped=skipped if decides else 0,
                 algorithm=algorithm,
             ),
             check(
@@ -539,6 +544,7 @@ def workers_vs_communication(
                 0.0,
                 config.min_pairs,
                 decides=decides,
+                dropped=skipped if decides else 0,
                 algorithm=algorithm,
             ),
             check(
@@ -700,7 +706,7 @@ def model_vs_dataset_size(
     parameters = per_dataset["total_parameters"].to_numpy()
     samples = per_dataset["n_samples"].to_numpy()
     datasets = per_dataset.height
-    together = rank_correlation(parameters, samples) if datasets >= config.min_datasets else float("nan")
+    together = rank_correlation(parameters, samples)
     gate = check(
         "Spearman(total_parameters, n_samples) across datasets",
         "Spearman",
@@ -909,22 +915,21 @@ def judge(
     stability: Stability,
 ) -> Outcome:
     thresholds = {name: getattr(config, name) for name in practice.thresholds}
-    common = (practice.name, practice.statement, practice.criterion(config), practice.confounds, thresholds)
+    criterion = (
+        f"{practice.criterion(config)} Supported means passing all four filters with the expected sign in at least "
+        f"{config.min_stable_terms} stable term(s)."
+    )
+    common = (practice.name, practice.statement, criterion, practice.confounds, thresholds)
     missing = lacking(frame, practice.needed)
     if missing:
         return Outcome(*common, (), (), (), None, None, NOT_TESTED, f"corpus lacks {', '.join(missing)}")
     found = practice.assess(frame, evidence, config, stability)
-    untested = [
-        f"{item.quantity}, {scope_text(item)} (n={item.n}{dropped_text(item)})"
-        for item in found.checks
-        if item.decides and not item.tested
-    ]
+    untested = [untested_text(item) for item in found.checks if item.decides and not item.tested]
     unavailable = [part.describe() for part in found.parts if not part.available]
     observed = None if untested or found.gate else found.observed
     equation = None if unavailable else all(part.supported for part in found.parts) and found.equation_extra
     if found.gate or untested or unavailable:
-        reasons = ([found.gate] if found.gate else []) + [f"too few matched units: {text}" for text in untested]
-        reasons += unavailable
+        reasons = ([found.gate] if found.gate else []) + untested + unavailable
         if observed is False:
             reasons += found.failures
         label, reason = NOT_TESTED, "; ".join(reasons)
@@ -955,7 +960,20 @@ def load_corpus(path: str | Path) -> pl.DataFrame:
 
 
 def dropped_text(item: Check) -> str:
-    return f", {item.dropped} non-finite dropped" if item.dropped else ""
+    return f"{item.dropped} non-finite units dropped" if item.dropped else ""
+
+
+def note_text(item: Check) -> str | None:
+    parts = ["not computable"] if not item.tested else []
+    if item.dropped:
+        parts.append(dropped_text(item))
+    return "; ".join(parts) or None
+
+
+def untested_text(item: Check) -> str:
+    label = "too few matched units" if item.n < item.minimum else "not computable"
+    counts = ", ".join(text for text in (f"n={item.n}", dropped_text(item)) if text)
+    return f"{label}: {item.quantity}, {scope_text(item)} ({counts})"
 
 
 def scope_text(item: Check) -> str:
@@ -1026,9 +1044,7 @@ def detail_rows(outcome: Outcome) -> list[dict[str, object]]:
                 "holds": item.holds,
                 "decides": item.decides,
                 "source": item.source,
-                "note": None if item.tested and not item.dropped else (
-                    "not computable" if not item.tested else f"{item.dropped} non-finite pairs dropped"
-                ) + (f"; {item.dropped} non-finite pairs dropped" if not item.tested and item.dropped else ""),
+                "note": note_text(item),
             }
         )
     for name, item in unique_supports(outcome):
@@ -1075,7 +1091,7 @@ def detail_rows(outcome: Outcome) -> list[dict[str, object]]:
                     "value": float(item.supported),
                     "holds": item.supported,
                     "source": source,
-                    "note": f"{name}: passes_all, expected sign and at least one stable term",
+                    "note": f"{name}: passes_all, expected sign and at least {item.stability.min_terms} stable term(s)",
                 }
             )
         effects = [effect for _, _, effect, _ in item.terms]
@@ -1092,8 +1108,8 @@ def detail_rows(outcome: Outcome) -> list[dict[str, object]]:
                     "unit": "count",
                     "value": float(item.stable_terms),
                     "direction": ">=",
-                    "threshold": float(item.min_terms),
-                    "holds": item.stable_terms >= item.min_terms,
+                    "threshold": float(item.stability.min_terms),
+                    "holds": item.stable_terms >= item.stability.min_terms,
                     "source": f"{item.slug}/term_frequency.csv",
                 }
             )
@@ -1131,7 +1147,8 @@ def flag_check(evidence: dict[str, Evidence | None], min_frequency: float) -> st
     for slug, found in evidence.items():
         if found is None or found.features.height == 0:
             continue
-        expected = found.features["mean_frequency"] >= min_frequency
+        frequency = found.features["mean_frequency"]
+        expected = frequency.is_finite() & (frequency >= min_frequency)
         stale = found.features.filter(found.features["pass_frequency"] != expected)["feature"].to_list()
         if stale:
             raise ValueError(f"{slug}: pass_frequency disagrees with min_frequency {min_frequency} for {stale}")

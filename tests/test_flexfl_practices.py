@@ -14,7 +14,7 @@ import polars as pl
 
 from ml_meta_perf import flexfl_practices as practices
 from ml_meta_perf.config import PracticesConfig, load_config, parse_config
-from ml_meta_perf.flexfl_baselines import FL_ALGOS, corpus_digest
+from ml_meta_perf.flexfl_baselines import corpus_digest
 from ml_meta_perf.flexfl_practices import (
     DETAIL_SCHEMA,
     MET,
@@ -37,6 +37,7 @@ ALGORITHMS = ("CentralizedSync", "CentralizedAsync", "DecentralizedSync", "Decen
 STRATEGIES = ("iid", "non_iid", "dirichlet")
 PARAMETERS = (100, 200, 300, 400, 500, 600, 700, 800)
 SAMPLES = (500, 100, 800, 300, 700, 200, 600, 400)
+MIN_FREQUENCY = 0.5
 
 SUPPORTING: dict[str, list[tuple[str, float, bool]]] = {
     "total_time_s-log1p": [("fl_algo_CentralizedAsync", -1.0, True), ("fl_algo_DecentralizedAsync", -1.0, True)],
@@ -133,7 +134,7 @@ def write_tables(
                 "pass_margin": [passes for _, _, passes in features],
                 "pass_direction": [passes for _, _, passes in features],
                 "pass_sign": [passes for _, _, passes in features],
-                "pass_frequency": [frequency >= 0.5] * len(names),
+                "pass_frequency": [frequency >= MIN_FREQUENCY] * len(names),
                 "passes_all": [passes for _, _, passes in features],
             }
         ).write_csv(target / "feature_evidence.csv")
@@ -162,14 +163,29 @@ def write_tables(
     return folder
 
 
+def run(
+    frame: pl.DataFrame, tables: Path, config: PracticesConfig | None = None, **options: Any
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    settings = {"min_frequency": MIN_FREQUENCY, "corpus_sha256": "abc", "commit": "test"} | options
+    return diagnose(frame, tables, practices_config() if config is None else config, **settings)
+
+
 def summary_row(frame: pl.DataFrame, tables: Path, config: PracticesConfig, practice: str) -> dict[str, Any]:
-    summary, _ = diagnose(frame, tables, config, min_frequency=0.5, corpus_sha256="abc", commit="test")
+    summary, _ = run(frame, tables, config)
     return summary.filter(pl.col("practice") == practice).row(0, named=True)
 
 
 def outcomes(frame: pl.DataFrame, tables: Path, config: PracticesConfig) -> dict[str, str]:
-    summary, _ = diagnose(frame, tables, config, min_frequency=0.5, corpus_sha256="abc", commit="test")
+    summary, _ = run(frame, tables, config)
     return dict(zip(summary["practice"].to_list(), summary["outcome"].to_list(), strict=True))
+
+
+def set_feature(tables: Path, slug: str, feature: str, **values: object) -> None:
+    path = tables / slug / "feature_evidence.csv"
+    target = pl.col("feature") == feature
+    pl.read_csv(path).with_columns(
+        *[pl.when(target).then(pl.lit(value)).otherwise(pl.col(name)).alias(name) for name, value in values.items()]
+    ).write_csv(path)
 
 
 class PracticeTestCase(unittest.TestCase):
@@ -191,9 +207,7 @@ class TestEveryPracticeMet(PracticeTestCase):
         self.assertEqual(labels, {"P1": MET, "P2": MET, "P3": MET, "P4": MET})
 
     def test_the_configured_cap_holds_model_size_at_qualified(self) -> None:
-        summary, _ = diagnose(
-            corpus(), self.tables(), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="test"
-        )
+        summary, _ = run(corpus(), self.tables())
         row = summary.filter(pl.col("practice") == "P4").row(0, named=True)
         self.assertEqual(row["outcome"], QUALIFIED)
         self.assertIn("capped by size_max_outcome", row["reason"])
@@ -291,9 +305,7 @@ class TestWorkersVersusCommunication(PracticeTestCase):
         self.assertIn("minus |median elasticity compute_time_max_s|", row["reason"])
 
     def test_per_algorithm_rows_are_reported_but_do_not_decide(self) -> None:
-        _, detail = diagnose(
-            corpus(), self.tables(), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="test"
-        )
+        _, detail = run(corpus(), self.tables())
         rows = detail.filter((pl.col("practice") == "P2") & (pl.col("algorithm") == "CentralizedAsync"))
         self.assertGreater(rows.height, 0)
         self.assertFalse(any(rows["decides"].to_list()))
@@ -374,24 +386,10 @@ class TestModelVersusDatasetSize(PracticeTestCase):
 class TestOutputs(PracticeTestCase):
     def test_tables_fitted_on_another_corpus_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "another corpus"):
-            diagnose(
-                corpus(),
-                self.tables(digest="000000000000"),
-                practices_config(),
-                min_frequency=0.5,
-                corpus_sha256="abc",
-                commit="t",
-            )
+            run(corpus(), self.tables(digest="000000000000"), commit="t")
 
     def test_tables_carry_their_schemas_thresholds_and_sources(self) -> None:
-        summary, detail = diagnose(
-            corpus(),
-            self.tables(),
-            practices_config(async_time_diff=-0.37),
-            min_frequency=0.5,
-            corpus_sha256="abc",
-            commit="c0ffee",
-        )
+        summary, detail = run(corpus(), self.tables(), practices_config(async_time_diff=-0.37), commit="c0ffee")
         self.assertEqual(summary.schema, pl.Schema(SUMMARY_SCHEMA))
         self.assertEqual(detail.schema, pl.Schema(DETAIL_SCHEMA))
         self.assertEqual(set(summary["corpus_sha256"].to_list()), {"abc"})
@@ -436,9 +434,7 @@ class TestOutputs(PracticeTestCase):
             outcomes(pl.concat([frame, frame.head(1)]), self.tables(), practices_config())
 
     def test_evidence_shared_by_two_parts_is_reported_once(self) -> None:
-        _, detail = diagnose(
-            corpus(), self.tables(), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="t"
-        )
+        _, detail = run(corpus(), self.tables(), commit="t")
         rows = detail.filter(
             (pl.col("practice") == "P3") & (pl.col("feature") == "strategy_iid") & (pl.col("quantity") == "present")
         )
@@ -455,18 +451,14 @@ class TestOutputs(PracticeTestCase):
     def test_the_sign_flag_and_the_support_flag_are_separate_rows(self) -> None:
         evidence = dict(SUPPORTING)
         evidence["compute_time_max_s-log1p"] = [("num_workers", -0.3, False)]
-        _, detail = diagnose(
-            corpus(), self.tables(evidence), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="t"
-        )
+        _, detail = run(corpus(), self.tables(evidence), commit="t")
         rows = detail.filter((pl.col("target") == "compute_time_max_s-log1p") & (pl.col("feature") == "num_workers"))
         flags = dict(zip(rows["quantity"].to_list(), rows["holds"].to_list(), strict=True))
         self.assertTrue(flags["decile_difference"])
         self.assertFalse(flags["supported"])
 
     def test_the_wall_time_ratio_is_on_raw_seconds(self) -> None:
-        _, detail = diagnose(
-            corpus(), self.tables(), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="t"
-        )
+        _, detail = run(corpus(), self.tables(), commit="t")
         ratio = detail.filter(pl.col("quantity") == "median async/sync ratio, total_time_s")["value"].to_list()
         self.assertEqual(ratio, [0.5, 0.5])
 
@@ -506,9 +498,7 @@ class TestOutputs(PracticeTestCase):
         self.assertEqual(found.terms, ((name, "architecture+federation", 2.0, 1.0),))
 
     def test_the_shipped_fixture_has_no_matched_units(self) -> None:
-        summary, _ = diagnose(
-            load_corpus(FIXTURE), self.tables(), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="t"
-        )
+        summary, _ = run(load_corpus(FIXTURE), self.tables(), commit="t")
         for row in summary.head(3).iter_rows(named=True):
             with self.subTest(practice=row["practice"]):
                 self.assertEqual(row["outcome"], NOT_TESTED)
@@ -542,9 +532,7 @@ class TestGuards(PracticeTestCase):
                 frame = corpus().with_columns(
                     pl.when(target).then(bad).otherwise(pl.col("performance")).alias("performance")
                 )
-                summary, detail = diagnose(
-                    frame, self.tables(), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="t"
-                )
+                summary, detail = run(frame, self.tables(), commit="t")
                 row = summary.filter(pl.col("practice") == "P3").row(0, named=True)
                 self.assertEqual(row["outcome"], MET)
                 rows = detail.filter(
@@ -553,12 +541,14 @@ class TestGuards(PracticeTestCase):
                     & (pl.col("algorithm") == "all")
                     & pl.col("decides")
                 )
-                self.assertEqual(rows["note"].to_list(), ["1 non-finite pairs dropped"] * 2)
+                self.assertEqual(rows["note"].to_list(), ["1 non-finite units dropped"] * 2)
 
     def test_a_constant_dataset_size_is_not_computable(self) -> None:
         frame = corpus(samples=(500,) * 8)
         row = summary_row(frame, self.tables(), practices_config(size_max_outcome=MET), "P4")
         self.assertEqual(row["outcome"], NOT_TESTED)
+        self.assertIn("not computable", row["reason"])
+        self.assertNotIn("too few matched units", row["reason"])
 
     def test_a_dataset_with_two_parameter_counts_is_rejected(self) -> None:
         frame = corpus().with_columns(
@@ -582,19 +572,25 @@ class TestGuards(PracticeTestCase):
         with self.assertRaisesRegex(ValueError, "pass_frequency disagrees"):
             outcomes(corpus(), tables, practices_config())
 
+    def test_a_non_finite_mean_frequency_with_a_false_flag_is_accepted(self) -> None:
+        tables = self.tables()
+        set_feature(tables, "n_epochs", "strategy_non_iid", mean_frequency=float("nan"), pass_frequency=False)
+        summary, _ = run(corpus(), tables)
+        self.assertEqual(summary.height, 4)
+        self.assertIn("fit margins", summary["tables_corpus_check"][0])
+
+    def test_a_true_flag_below_the_current_min_frequency_is_rejected(self) -> None:
+        tables = self.tables()
+        set_feature(tables, "n_epochs", "strategy_non_iid", mean_frequency=MIN_FREQUENCY / 2, pass_frequency=True)
+        with self.assertRaisesRegex(ValueError, "pass_frequency disagrees"):
+            run(corpus(), tables)
+
     def test_the_fit_margins_are_listed_for_matching_tables(self) -> None:
         row = summary_row(corpus(), self.tables(), practices_config(), "P1")
         self.assertIn("fit margins", row["tables_corpus_check"])
 
     def test_the_equation_comparison_is_reported_under_equation_evidence(self) -> None:
-        summary, detail = diagnose(
-            corpus(),
-            self.tables(),
-            practices_config(size_max_outcome=MET),
-            min_frequency=0.5,
-            corpus_sha256="abc",
-            commit="t",
-        )
+        summary, detail = run(corpus(), self.tables(), practices_config(size_max_outcome=MET), commit="t")
         row = summary.filter(pl.col("practice") == "P4").row(0, named=True)
         self.assertNotIn("|decile difference", row["observed"])
         self.assertIn("|decile difference", row["equation_evidence"])
@@ -605,6 +601,101 @@ class TestGuards(PracticeTestCase):
             {"comm_bytes_total-log1p/feature_evidence.csv", "comm_time_total_s-log1p/feature_evidence.csv"},
         )
 
+    def test_the_fit_margins_name_each_table(self) -> None:
+        row = summary_row(corpus(), self.tables(digest="abc"), practices_config(), "P1")
+        self.assertIn("total_time_s-log1p=0.1", row["tables_corpus_check"])
+
+    def test_the_stable_term_minimum_is_stated_in_the_criterion_and_the_support_rows(self) -> None:
+        summary, detail = run(corpus(), self.tables(), practices_config(min_stable_terms=2))
+        criterion = summary.filter(pl.col("practice") == "P1")["criterion"][0]
+        self.assertIn("at least 2 stable term", criterion)
+        notes = detail.filter((pl.col("practice") == "P1") & (pl.col("quantity") == "supported"))["note"].to_list()
+        self.assertGreater(len(notes), 0)
+        for note in notes:
+            self.assertIn("at least 2 stable term", note)
+
+    def test_the_stable_term_threshold_row_carries_the_configured_minimum(self) -> None:
+        _, detail = run(corpus(), self.tables(), practices_config(min_stable_terms=2))
+        thresholds = detail.filter(pl.col("quantity") == "stable_terms")["threshold"].unique().to_list()
+        self.assertEqual(thresholds, [2.0])
+
+    def test_cells_with_a_non_finite_elasticity_are_dropped_and_counted(self) -> None:
+        pooled = (
+            (pl.col("practice") == "P2")
+            & (pl.col("algorithm") == "all")
+            & (pl.col("quantity") == "median elasticity, compute_time_max_s")
+        )
+        _, clean = run(corpus(), self.tables())
+        cell = (pl.col("dataset") == "d0") & (pl.col("fl_algo") == "CentralizedSync") & (pl.col("strategy") == "iid")
+        frame = corpus().with_columns(
+            pl.when(cell).then(float("nan")).otherwise(pl.col("compute_time_max_s")).alias("compute_time_max_s")
+        )
+        summary, detail = run(frame, self.tables())
+        row = detail.filter(pooled).row(0, named=True)
+        self.assertIn("1 non-finite units dropped", row["note"] or "")
+        self.assertEqual(row["n"], clean.filter(pooled)["n"][0] - 1)
+        self.assertEqual(summary.filter(pl.col("practice") == "P2")["outcome"][0], MET)
+
+    def test_a_non_finite_wall_time_is_dropped_and_counted(self) -> None:
+        row = (
+            (pl.col("dataset") == "d0")
+            & (pl.col("fl_algo") == "CentralizedSync")
+            & (pl.col("strategy") == "iid")
+            & (pl.col("combo") == "c0")
+        )
+        frame = corpus().with_columns(
+            pl.when(row).then(float("nan")).otherwise(pl.col("total_time_s")).alias("total_time_s")
+        )
+        summary, detail = run(frame, self.tables())
+        self.assertEqual(summary.filter(pl.col("practice") == "P1")["outcome"][0], MET)
+        rows = detail.filter(
+            (pl.col("practice") == "P1")
+            & (pl.col("family") == "Centralized")
+            & (pl.col("quantity") == "median async-sync difference, total_time_s")
+        )
+        self.assertEqual(rows["note"].to_list(), ["1 non-finite units dropped"])
+
+    def test_a_dataset_with_two_sample_counts_is_rejected(self) -> None:
+        frame = corpus().with_columns(
+            pl.when((pl.col("dataset") == "d0") & (pl.col("combo") == "c0"))
+            .then(999)
+            .otherwise(pl.col("n_samples"))
+            .alias("n_samples")
+        )
+        with self.assertRaisesRegex(ValueError, "varies within dataset"):
+            outcomes(frame, self.tables(), practices_config())
+
+    def test_constant_communication_bytes_leave_the_size_practice_untested(self) -> None:
+        frame = corpus().with_columns(pl.lit(1000.0).alias("comm_bytes_total"))
+        row = summary_row(frame, self.tables(), practices_config(size_max_outcome=MET), "P4")
+        self.assertEqual(row["outcome"], NOT_TESTED)
+        self.assertIn("not computable", row["reason"])
+
+    def test_non_finite_iid_rows_leave_a_split_without_enough_pairs(self) -> None:
+        frame = corpus().with_columns(
+            pl.when(
+                (pl.col("strategy") == "iid")
+                & (pl.col("main_metric") == "mcc")
+                & pl.col("dataset").is_in(["d0", "d2", "d4"])
+            )
+            .then(float("nan"))
+            .otherwise(pl.col("performance"))
+            .alias("performance")
+        )
+        summary, detail = run(frame, self.tables())
+        reason = summary.filter(pl.col("practice") == "P3")["reason"][0]
+        self.assertEqual(summary.filter(pl.col("practice") == "P3")["outcome"][0], NOT_TESTED)
+        self.assertIn("non-finite units dropped", reason)
+        notes = detail.filter(
+            (pl.col("practice") == "P3")
+            & (pl.col("task") == "classification")
+            & (pl.col("algorithm") == "all")
+            & pl.col("decides")
+        )["note"].to_list()
+        self.assertEqual(len(notes), 2)
+        for note in notes:
+            self.assertTrue(note.startswith("not computable; "))
+
     def test_the_dataset_minimum_comes_from_the_config(self) -> None:
         labels = outcomes(corpus(), self.tables(), practices_config(min_datasets=9, size_max_outcome=MET))
         self.assertEqual(labels["P4"], NOT_TESTED)
@@ -614,9 +705,7 @@ class TestGuards(PracticeTestCase):
         self.assertEqual(labels["P2"], QUALIFIED)
 
     def test_the_recorded_thresholds_name_the_new_keys(self) -> None:
-        summary, _ = diagnose(
-            corpus(), self.tables(), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="t"
-        )
+        summary, _ = run(corpus(), self.tables(), commit="t")
         recorded = {row["practice"]: json.loads(row["thresholds"]) for row in summary.iter_rows(named=True)}
         self.assertIn("min_datasets", recorded["P4"])
         for thresholds in recorded.values():
@@ -680,9 +769,7 @@ class TestCoverage(PracticeTestCase):
         self.assertIn("mape", row["reason"])
 
     def test_min_pairs_is_inclusive_for_the_pooled_cells(self) -> None:
-        _, detail = diagnose(
-            corpus(), self.tables(), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="t"
-        )
+        _, detail = run(corpus(), self.tables(), commit="t")
         cells = detail.filter((pl.col("practice") == "P2") & pl.col("decides") & (pl.col("part") == "observed"))[
             "n"
         ].unique().to_list()
@@ -706,7 +793,9 @@ class TestCoverage(PracticeTestCase):
             holds(1.0, "==", 1.0)
 
     def test_the_algorithm_and_split_lists_come_from_the_baselines(self) -> None:
-        self.assertEqual(practices.ALGORITHMS, FL_ALGOS)
+        self.assertEqual(
+            practices.ALGORITHMS, ("CentralizedSync", "CentralizedAsync", "DecentralizedSync", "DecentralizedAsync")
+        )
         self.assertEqual(practices.SKEWED, ("non_iid", "dirichlet"))
 
     def test_the_pooled_median_decides_over_one_rising_algorithm(self) -> None:
@@ -716,9 +805,7 @@ class TestCoverage(PracticeTestCase):
             .otherwise(pl.col("compute_time_max_s"))
             .alias("compute_time_max_s")
         )
-        _, detail = diagnose(
-            frame, self.tables(), practices_config(), min_frequency=0.5, corpus_sha256="abc", commit="t"
-        )
+        _, detail = run(frame, self.tables(), commit="t")
         own = detail.filter(
             (pl.col("practice") == "P2")
             & (pl.col("algorithm") == "CentralizedSync")
@@ -761,6 +848,8 @@ class TestCoverage(PracticeTestCase):
         frame = corpus().filter(pl.col("dataset").is_in(["d0", "d1"]))
         row = summary_row(frame, self.tables(), practices_config(size_max_outcome=MET), "P4")
         self.assertEqual(row["outcome"], NOT_TESTED)
+        self.assertIn("too few matched units", row["reason"])
+        self.assertNotIn("collinear", row["reason"])
 
     def test_a_stable_term_needs_the_configured_frequency_and_count(self) -> None:
         name = "[log(num_workers)]"
@@ -816,6 +905,16 @@ class TestPracticesConfig(unittest.TestCase):
         self.assertEqual(config.min_pairs, 30)
         self.assertEqual(config.size_max_outcome, QUALIFIED)
         self.assertEqual(config.size_rho, 0.74)
+        self.assertEqual(config.min_datasets, 3)
+        self.assertEqual(config.min_stable_terms, 1)
+        self.assertEqual(config.async_time_diff, -0.10)
+        self.assertEqual(config.async_epoch_diff, 2.0)
+        self.assertEqual(config.async_bytes_diff, 0.10)
+        self.assertEqual(config.workers_elasticity_gap, 0.10)
+        self.assertEqual(config.non_iid_epoch_diff, 2.0)
+        self.assertEqual(config.non_iid_mcc_diff, -0.02)
+        self.assertEqual(config.non_iid_mape_diff, 0.02)
+        self.assertEqual(config.size_collinear_rho, 0.74)
 
     def test_invalid_values_are_rejected(self) -> None:
         for change in (
@@ -828,6 +927,10 @@ class TestPracticesConfig(unittest.TestCase):
             {"workers_elasticity_gap": float("nan")},
             {"min_datasets": 2},
             {"min_stable_terms": 0},
+            {"async_bytes_diff": -0.1},
+            {"non_iid_epoch_diff": -1.0},
+            {"non_iid_mape_diff": -0.02},
+            {"async_time_diff": float("inf")},
         ):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 practices_config(**change)
