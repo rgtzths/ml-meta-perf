@@ -132,6 +132,31 @@ class EffectsConfig:
             raise KeyError(f"{slug!r} is not configured; configured slugs: {configured}") from None
 
 
+@dataclass(frozen=True)
+class PracticesConfig:
+    min_pairs: int
+    async_time_diff: float
+    async_epoch_diff: float
+    async_bytes_diff: float
+    workers_elasticity_gap: float
+    non_iid_epoch_diff: float
+    non_iid_mcc_diff: float
+    non_iid_mape_diff: float
+    size_rho: float
+    size_collinear_rho: float
+    size_max_outcome: str
+
+    def __post_init__(self) -> None:
+        if self.min_pairs < 2:
+            raise ValueError(f"min_pairs must be at least 2, got {self.min_pairs}")
+        for name in ("size_rho", "size_collinear_rho"):
+            value = getattr(self, name)
+            if not 0.0 < value <= 1.0:
+                raise ValueError(f"{name} must lie in (0, 1], got {value}")
+        if self.size_max_outcome not in ("met", "qualified"):
+            raise ValueError(f"size_max_outcome must be 'met' or 'qualified', got {self.size_max_outcome!r}")
+
+
 def margin_key(schema: Schema) -> str:
     if schema.target_column == "performance":
         return schema.slug
@@ -147,6 +172,7 @@ class StudyConfig:
     opaque: OpaqueConfig
     sweep: SweepConfig
     effects: EffectsConfig
+    flexfl_practices: PracticesConfig
 
 
 def parse_config(payload: dict[str, Any]) -> StudyConfig:
@@ -157,6 +183,7 @@ def parse_config(payload: dict[str, Any]) -> StudyConfig:
         selection=SelectionConfig(**payload["selection"]),
         opaque=OpaqueConfig(**payload["opaque"]),
         effects=EffectsConfig(**payload["effects"]),
+        flexfl_practices=PracticesConfig(**payload["flexfl_practices"]),
         sweep=SweepConfig(
             zscores=tuple(float(value) for value in sweep["zscores"]),
             penalties=tuple(float(value) for value in sweep["penalties"]),

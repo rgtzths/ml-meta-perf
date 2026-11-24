@@ -156,6 +156,41 @@ the row whose terms no held-out target chose. A protocol whose fold has an empty
 corpus missing one of the three strategies, is skipped with a note on stderr and in
 `baseline_notes.txt`.
 
+## Practice diagnostics
+
+`ml-meta-perf-practices` tests four FL practices against a FlexFL corpus and the per-target tables of an
+earlier run (`feature_evidence.csv`, `term_frequency.csv` and `equation.json` under each `<slug>/`). It fits
+nothing. Every threshold is in the `flexfl_practices` section of `config/study.json`, and the run records them.
+
+- P1, asynchronous algorithms shorten wall time but need more epochs or bytes. Async minus sync, paired on
+  dataset, distribution and worker combination within the Centralized and the Decentralized family.
+- P2, more workers raise communication volume and time faster than they cut compute time. Elasticity of
+  `comm_bytes_total`, `comm_time_total_s` and `compute_time_max_s` with `num_workers` within each dataset,
+  algorithm and distribution, pooled and per algorithm.
+- P3, non-IID and Dirichlet splits need more epochs and reach lower performance than IID. Paired on dataset,
+  algorithm and worker combination; MCC is higher-better, mape lower-better.
+- P4, parameter count drives communication bytes and time more than dataset size. Spearman correlations over
+  the per-dataset medians; capped by `size_max_outcome`, since each dataset has one network.
+
+A practice is `not tested` when a deciding comparison has fewer matched units than `min_pairs`, the
+corpus lacks a column it needs, or no relevant equation contains its feature (or that target's table is
+missing). It is `met` when its observed criterion holds and every required feature passes all four
+`feature_evidence.csv` filters with the expected sign and sits in at least one term reselected in at least
+`effects.min_frequency` of the exclusions (P4 also needs a larger |decile difference| for `total_parameters`
+than for `n_samples`), and `qualified` otherwise, including a contradicted practice. A not-tested reason also
+names any observed criterion that failed. Spearman comparisons need at least 3 datasets to be computable.
+The run stops when a table's `baseline_comparison.csv` names another corpus, and records tables without one.
+
+`practices.csv` has one row per practice with the criterion, the observed and equation evidence as text,
+`observed_holds`, `equation_holds` (empty when not computable), the outcome and its reason, the practice's
+thresholds, the corpus digest and the commit. `practices_detail.csv` has one row per number, with its family, algorithm, split,
+task or target, unit, comparison direction, threshold, whether it holds and decides, and the source file
+(`corpus`, or the target's `feature_evidence.csv` or `term_frequency.csv`). `decides` marks the rows the
+outcome rests on; per-algorithm and descriptive rows are reported only. On equation rows, `decile_difference`
+holds when its sign is the expected one and `supported` when the feature also passes all four filters in a
+stable term; a feature shared by several parts appears once, with the parts in `note`. Time and byte
+differences are on the log1p scale; mape is a fraction.
+
 ## Commands
 
 ```bash
@@ -173,6 +208,10 @@ ml-meta-perf --target comm_bytes_total --log-target --data meta_dataset.csv --ex
 
 # the configuration sweep on the same target
 ml-meta-perf-search --target total_time_s --log-target --data meta_dataset.csv --output results/sweep_time
+
+# the practice diagnostics over the tables of earlier fits; writes practices.csv (one row per
+# practice) and practices_detail.csv (every number with its source) under results/flexfl/
+ml-meta-perf-practices --data meta_dataset.csv --tables results/flexfl
 ```
 
 `term_effects.csv` has a `group` column (`dataset`, `architecture`, `fl_config`, `federation` or `mixed`),

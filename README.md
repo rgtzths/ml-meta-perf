@@ -274,6 +274,17 @@ effective configuration. E1, E2 and E3 share every one of these values.
 | `effects.decile_margin` | per target | minimum decile difference in the fitted target scale |
 | `effects.min_direction` | 0.15 | minimum absolute Spearman correlation for directional evidence |
 | `effects.min_frequency` | 0.5 | minimum mean term reselection frequency |
+| `flexfl_practices.min_pairs` | 30 | fewest matched pairs or cells for a deciding practice comparison |
+| `flexfl_practices.async_time_diff` | -0.10 | P1: largest median async-sync log1p wall-time difference that counts as shorter |
+| `flexfl_practices.async_epoch_diff` | 2.0 | P1: smallest median async-sync epoch difference that counts as more epochs |
+| `flexfl_practices.async_bytes_diff` | 0.10 | P1: smallest median async-sync log1p byte difference that counts as more bytes |
+| `flexfl_practices.workers_elasticity_gap` | 0.10 | P2: margin by which communication elasticity must exceed the compute elasticity's magnitude |
+| `flexfl_practices.non_iid_epoch_diff` | 2.0 | P3: smallest median skewed-iid epoch difference |
+| `flexfl_practices.non_iid_mcc_diff` | -0.02 | P3: largest median skewed-iid MCC difference |
+| `flexfl_practices.non_iid_mape_diff` | 0.02 | P3: smallest median skewed-iid mape difference |
+| `flexfl_practices.size_rho` | 0.74 | P4: Spearman bar over the per-dataset medians (n=8 critical value) |
+| `flexfl_practices.size_collinear_rho` | 0.74 | P4: parameter count and dataset size count as collinear at or above this |
+| `flexfl_practices.size_max_outcome` | qualified | P4: highest outcome the practice can reach |
 | `opaque.forest_trees` | 100 | random forest size |
 | `opaque.forest_max_features` | 0.33 | share of features considered at each forest split |
 | `opaque.boosting_stages` | 50 | gradient boosting stages |
@@ -387,6 +398,8 @@ src/ml_meta_perf/
     experiment.py   the end-to-end study: one configuration, one length rule, E1/E2/E3/E3-MAX
     config.py       the typed schema of config/study.json and its loader
     sweep.py        `ml-meta-perf-search`: the configuration sweep that proposes study.json
+    flexfl_practices.py
+                    `ml-meta-perf-practices`: four FL practices against the FlexFL tables
     cli.py          the jsonargparse pipeline: `ml-meta-perf`, `python -m ml_meta_perf`
 config/             study.json, every tuned hyperparameter
 dataset/            meta_dataset.csv, the versioned corpus

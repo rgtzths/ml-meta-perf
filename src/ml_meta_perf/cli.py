@@ -33,6 +33,7 @@ from ml_meta_perf.config import (
     Configuration,
     EffectsConfig,
     OpaqueConfig,
+    PracticesConfig,
     SelectionConfig,
     SweepConfig,
 )
@@ -228,6 +229,9 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--effects", type=EffectsConfig, help="the FlexFL feature evidence filters")
     parser.add_argument("--opaque", type=OpaqueConfig, help="the opaque regressors' sizes")
     parser.add_argument("--sweep", type=SweepConfig, help="the grid `ml-meta-perf-search` explores (unused here)")
+    parser.add_argument(
+        "--flexfl_practices", type=PracticesConfig, help="the FlexFL practice criteria (`ml-meta-perf-practices`)"
+    )
 
     parser.add_argument(
         "--data", type=str | None, default=None, help="meta-dataset CSV (default: dataset/meta_dataset.csv)"

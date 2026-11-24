@@ -109,6 +109,8 @@ ml-meta-perf = "ml_meta_perf.cli:main"
 # `ml-meta-perf` run reproduces the configuration in `config/study.json`, while this command
 # fits every point of its grid and proposes a replacement file.
 ml-meta-perf-search = "ml_meta_perf.sweep:main"
+# FlexFL practice diagnostics: reads a corpus and the tables of an earlier FlexFL run, fits nothing.
+ml-meta-perf-practices = "ml_meta_perf.flexfl_practices:main"
 
 [project.urls]
 Repository = "https://github.com/mariolpantunes/ml-meta-perf"
