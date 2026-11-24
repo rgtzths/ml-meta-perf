@@ -27,6 +27,8 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
+from ml_meta_perf.data import Schema
+
 #: The configuration file, relative to the repository root. Resolved like the corpus
 #: (`data.DEFAULT_PATH`): the source checkout this module runs from, else the working directory.
 CONFIG_RELATIVE_PATH = Path("config") / "study.json"
@@ -117,6 +119,26 @@ class SweepConfig:
 
 
 @dataclass(frozen=True)
+class EffectsConfig:
+    decile_margin: dict[str, float]
+    min_direction: float
+    min_frequency: float
+
+    def margin_for(self, slug: str) -> float:
+        try:
+            return self.decile_margin[slug]
+        except KeyError:
+            configured = ", ".join(self.decile_margin)
+            raise KeyError(f"{slug!r} is not configured; configured slugs: {configured}") from None
+
+
+def margin_key(schema: Schema) -> str:
+    if schema.target_column == "performance":
+        return schema.slug
+    return f"{schema.target_column}-log1p" if schema.log_target else schema.target_column
+
+
+@dataclass(frozen=True)
 class StudyConfig:
     """The whole of ``config/study.json``."""
 
@@ -124,6 +146,7 @@ class StudyConfig:
     selection: SelectionConfig
     opaque: OpaqueConfig
     sweep: SweepConfig
+    effects: EffectsConfig
 
 
 def parse_config(payload: dict[str, Any]) -> StudyConfig:
@@ -133,6 +156,7 @@ def parse_config(payload: dict[str, Any]) -> StudyConfig:
         search=Configuration(**payload["search"]),
         selection=SelectionConfig(**payload["selection"]),
         opaque=OpaqueConfig(**payload["opaque"]),
+        effects=EffectsConfig(**payload["effects"]),
         sweep=SweepConfig(
             zscores=tuple(float(value) for value in sweep["zscores"]),
             penalties=tuple(float(value) for value in sweep["penalties"]),

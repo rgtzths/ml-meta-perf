@@ -238,7 +238,8 @@ whose doubly-held-out predictions rank the models best. It writes `proposed_stud
 adopting it is a reviewed edit to `config/study.json`.
 
 FlexFL targets are available in both commands; see [the FlexFL guide](FLEXFL.md). The study CLI writes `equation.json`, `equation.txt`, `curve.csv`,
-`term_effects.csv` and `group_shares.csv` under `<output>/flexfl/<slug>/`, and with
+`term_effects.csv`, `group_shares.csv`, `term_frequency.csv` and `feature_evidence.csv`
+under `<output>/flexfl/<slug>/`, and with
 `--baselines` or `--extrapolation` also `baseline_comparison.csv` and `baseline_notes.txt`.
 In `term_effects.csv`, `group` is one of `dataset`, `architecture`, `fl_config`, `federation` or `mixed`,
 `blocks` lists the blocks a term spans, and `effect` is the 10th-to-90th percentile range of its weighted contribution.
@@ -270,6 +271,9 @@ effective configuration. E1, E2 and E3 share every one of these values.
 | `selection.window` | 4 | lengths after a candidate that must stay within `delta` |
 | `selection.smoothing` | 3 | width of the running median applied to the worst-protocol curve |
 | `selection.capability_arity` | 3 | the wider grammar E3-MAX is fitted under |
+| `effects.decile_margin` | per target | minimum decile difference in the fitted target scale |
+| `effects.min_direction` | 0.15 | minimum absolute Spearman correlation for directional evidence |
+| `effects.min_frequency` | 0.5 | minimum mean term reselection frequency |
 | `opaque.forest_trees` | 100 | random forest size |
 | `opaque.forest_max_features` | 0.33 | share of features considered at each forest split |
 | `opaque.boosting_stages` | 50 | gradient boosting stages |

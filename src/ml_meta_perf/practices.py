@@ -120,6 +120,75 @@ def _frequency_lookup(stability: pl.DataFrame | None) -> dict[str, float]:
     return dict(zip(stability["term"].to_list(), stability["frequency"].to_list(), strict=True))
 
 
+def term_frequencies(effects: pl.DataFrame, stability: pl.DataFrame, searches: int) -> pl.DataFrame:
+    folds_by_term = dict(zip(stability["term"].to_list(), stability["folds"].to_list(), strict=True))
+    terms = effects.with_columns(
+        pl.Series("folds", [folds_by_term.get(term, 0) for term in effects["term"].to_list()], dtype=pl.Int64),
+        pl.lit(searches, dtype=pl.Int64).alias("searches"),
+    ).with_columns((pl.col("folds") / pl.col("searches")).alias("frequency"))
+    return terms
+
+
+def decile_difference(values: np.ndarray, total: np.ndarray) -> float:
+    lo = np.quantile(values, DECILE)
+    hi = np.quantile(values, 1 - DECILE)
+    return float(total[values >= hi].mean() - total[values <= lo].mean())
+
+
+def feature_evidence(
+    equation: Equation,
+    columns: dict[str, np.ndarray],
+    stability: pl.DataFrame,
+    *,
+    margin: float,
+    min_direction: float,
+    min_frequency: float,
+) -> pl.DataFrame:
+    schema = {
+        "feature": pl.String,
+        "meaning": pl.String,
+        "n_terms": pl.Int64,
+        "decile_difference": pl.Float64,
+        "spearman": pl.Float64,
+        "mean_frequency": pl.Float64,
+        "margin": pl.Float64,
+        "pass_margin": pl.Boolean,
+        "pass_direction": pl.Boolean,
+        "pass_sign": pl.Boolean,
+        "pass_frequency": pl.Boolean,
+        "passes_all": pl.Boolean,
+    }
+    practices = feature_practices(equation, columns, stability)
+    if practices.height == 0:
+        return pl.DataFrame(schema=schema)
+    matrix = contributions(equation, columns)
+    differences = []
+    for feature in practices["feature"].to_list():
+        indices = [i for i, term in enumerate(equation.terms) if feature in term.features]
+        total = matrix[:, indices].sum(axis=1)
+        differences.append(decile_difference(columns[feature], total))
+    practices = practices.with_columns(pl.Series("effect", differences))
+    table = practices.rename(
+        {"effect": "decile_difference", "direction": "spearman", "stability": "mean_frequency"}
+    ).with_columns(pl.lit(margin).alias("margin"))
+    table = table.with_columns(
+        (pl.col("decile_difference").is_finite() & (pl.col("decile_difference").abs() >= margin)).alias("pass_margin"),
+        (pl.col("spearman").is_finite() & (pl.col("spearman").abs() >= min_direction)).alias("pass_direction"),
+        (
+            pl.col("spearman").is_finite()
+            & (pl.col("spearman") != 0.0)
+            & (pl.col("decile_difference") != 0.0)
+            & (pl.col("spearman").sign() == pl.col("decile_difference").sign())
+        ).alias("pass_sign"),
+        (pl.col("mean_frequency").is_finite() & (pl.col("mean_frequency") >= min_frequency)).alias(
+            "pass_frequency"
+        ),
+    ).with_columns(
+        pl.all_horizontal("pass_margin", "pass_direction", "pass_sign", "pass_frequency").alias("passes_all")
+    )
+    return table.sort(pl.col("decile_difference").abs(), descending=True).select(list(schema))
+
+
 def _confidence(effect: float, stability: float) -> str:
     if np.isnan(stability):
         return "unrated"

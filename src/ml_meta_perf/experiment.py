@@ -28,7 +28,7 @@ import polars as pl
 
 from ml_meta_perf.analysis import feature_reach, grammar_ceiling, saturated_fit, screen
 from ml_meta_perf.attribution import block_effects, block_shares, group_shares, term_effects, variance_decomposition
-from ml_meta_perf.config import Configuration, OpaqueConfig, SelectionConfig, load_config
+from ml_meta_perf.config import Configuration, EffectsConfig, OpaqueConfig, SelectionConfig, load_config, margin_key
 from ml_meta_perf.data import (
     DATASET_COLUMN,
     DATASET_FEATURES,
@@ -48,7 +48,7 @@ from ml_meta_perf.opaque import Builder as OpaqueBuilder
 from ml_meta_perf.opaque import OpaqueRun
 from ml_meta_perf.opaque import estimators as opaque_estimators
 from ml_meta_perf.opaque import evaluate as opaque_evaluate
-from ml_meta_perf.practices import best_practices, feature_practices
+from ml_meta_perf.practices import best_practices, feature_evidence, feature_practices, term_frequencies
 from ml_meta_perf.search import prune, pruning_threshold, search
 from ml_meta_perf.selection import complexity, floor_argmax, floor_curve, plateau_knee, protocol_spread, smoothed
 from ml_meta_perf.stats import mae, r2_score
@@ -322,6 +322,8 @@ class FlexFLReport:
     equation: EquationReport
     effects: pl.DataFrame
     shares: pl.DataFrame
+    terms: pl.DataFrame
+    features: pl.DataFrame
 
 
 def run_flexfl(
@@ -330,6 +332,7 @@ def run_flexfl(
     config: Configuration | None = None,
     selection: SelectionConfig | None = None,
     name: str = "E3",
+    effects_config: EffectsConfig | None = None,
 ) -> FlexFLReport:
     """Load a FlexFL meta-dataset and run the single E3 fit, both feature groups at once.
 
@@ -338,6 +341,8 @@ def run_flexfl(
     A ``log_target`` schema fits and scores ``log1p`` of the target.
     """
     config, selection = _resolve(config, selection)
+    effects_config = effects_config or load_config().effects
+    margin = effects_config.margin_for(margin_key(schema))
     frame = load(path, schema)
     schema = drop_constant_features(frame, schema)
     report = run_equation(
@@ -354,7 +359,17 @@ def run_flexfl(
     label = schema.label
     effects = effects.with_columns(pl.col("direction").str.replace("MCC", label, literal=True))
     shares = block_shares(report.equation, columns)
-    return FlexFLReport(schema, report, effects, shares)
+    assert report.stability is not None
+    terms = term_frequencies(effects, report.stability, frame[schema.dataset_column].n_unique())
+    features = feature_evidence(
+        report.equation,
+        columns,
+        terms.select("term", "folds", "frequency"),
+        margin=margin,
+        min_direction=effects_config.min_direction,
+        min_frequency=effects_config.min_frequency,
+    )
+    return FlexFLReport(schema, report, effects, shares, terms, features)
 
 
 def equation_text(equation: Equation, label: str) -> str:
